@@ -1,4 +1,4 @@
-# 🗣️ Text-to-Speech Webhook API
+# 🗣️ Criação e customização de voz API
 
 Este é um projeto FastAPI que recebe uma lista de nomes e um áudio base, gera áudios personalizados com os nomes via TTS (Text-to-Speech), e envia cada arquivo para um endpoint externo de customização de voz.
 
@@ -110,7 +110,7 @@ O sistema envia para o webhook definido em `WEBHOOK_URL` no formato `multipart/f
 ---
 
 ## ✨ Futuras melhorias (sugestões)
-
+- Customização de voz
 - Dashboard para acompanhamento
 - Notificações por e-mail e whatsapp
 - Upload de nomes via `.csv`
