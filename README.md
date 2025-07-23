@@ -1,122 +1,97 @@
-# 🗣️ Criação e customização de voz API
+# 🧠 Custom Audio Generator - Substituição de Voz por IA
 
-Este é um projeto FastAPI que recebe uma lista de nomes e um áudio base, gera áudios personalizados com os nomes via TTS (Text-to-Speech), e envia cada arquivo para um endpoint externo de customização de voz.
+Este projeto usa FastAPI para substituir trechos de áudio de um vídeo por vozes geradas por IA, com base em uma palavra-chave e uma lista de nomes. Ideal para vídeos personalizados com entonação natural.
 
 ## 🚀 Funcionalidades
 
-- Recebe um áudio base (por exemplo, uma introdução gravada).
-- Recebe uma lista de nomes.
-- Gera arquivos de áudio com os nomes usando a biblioteca `gTTS`.
-- Envia os áudios gerados e o áudio base para um webhook externo.
-- Processamento assíncrono com `BackgroundTasks`.
+- Recebe vídeo (.mp4) com áudio embutido.
+- Extrai e transcreve o áudio com timestamps.
+- Localiza a palavra-chave no áudio e substitui com voz IA.
+- Substituição feita com precisão temporal e naturalidade.
+- Suporte a diferentes estilos de pausa: vírgula, ponto ou SSML.
+- Envio automático do vídeo final via Webhook.
 
----
-
-## 📦 Estrutura do Projeto
+## 🗂 Estrutura do Projeto
 
 ```
-textToSpeech/
-├── main.py                # Ponto de entrada FastAPI (Controller)
+.
+├── main.py
 ├── services/
-│   └── audio_service.py   # Lógica de geração e envio de áudio (Service)
-└── README.md              # Este arquivo
+│   └── audio_service.py
+├── requirements.txt
+└── README.md
 ```
-
----
 
 ## 📥 Requisitos
 
 - Python 3.11
-- FastAPI
-- Uvicorn
-- gTTS
-- httpx
+- FFmpeg instalado no PATH
+- Servidor local com endpoints:
+  - `/speech-to-text`
+  - `/text-to-speech`
+  - `/add-voice`
+  - `/convert-audio`
+  - `/voices`
 
----
-
-## 🔧 Instalação
+## 🛠 Instalação
 
 ```bash
-# Clone o repositório
+# Clone o projeto
 git clone https://github.com/ProjetoNexo360/VideoSmartAI-Python.git
+cd VideoSmartAI-Python
 
-
-# Crie e ative um ambiente virtual
+# Crie o ambiente virtual
 python -m venv venv
-source venv/bin/activate     # Linux/macOS
-venv\Scripts\activate      # Windows
+venv\Scripts\activate  # Windows
+# source venv/bin/activate  # Linux/macOS
 
 # Instale as dependências
 pip install -r requirements.txt
 ```
 
-Arquivo `requirements.txt` contem:
-
-```
-fastapi
-uvicorn
-httpx
-pyttsx3
-python-multipart
-```
-
----
-
-## ▶️ Como executar
+## ▶️ Execução
 
 ```bash
 uvicorn main:app --reload
 ```
 
-Acesse a documentação interativa:
-- http://localhost:8000/docs
+Acesse: [http://localhost:8000/docs](http://localhost:8000/docs)
 
----
+## 📤 Endpoint: `POST /processar-video`
 
-## 📤 Endpoint: `POST /gerar-audios/{user_id}`
+### Parâmetros:
 
-### 🔗 Exemplo de chamada via Swagger UI ou Postman
+- `user_id`: UUID do usuário (query)
+- `nomes`: Lista de nomes (form)
+- `palavra_chave`: Palavra a ser substituída (form)
+- `video`: Arquivo de vídeo .mp4 (form)
 
-**URL:**  
-```
-POST http://localhost:8000/gerar-audios/{user_id}
-```
+## 🔁 Personalização de Pausa na Voz
 
-**Parâmetros:**
+Dentro de `audio_service.py`:
 
-- `user_id` (path): UUID do usuário
-- `nomes` (form): Lista de nomes separados por vírgula (ex: `João,Maria,Carlos`)
-- `audio_base` (file): Arquivo de áudio base (formato mp3 recomendado)
-
-**Retorno:**
-```json
-{
-  "message": "Processamento iniciado",
-  "user_id": "6f150efb-6f8b-4df7-8889-342d8a2f4cb5"
-}
+```python
+# Escolha o formato da pausa ao redor do nome:
+formato_pausa = ", {nome},"  # (ativo - vírgula)
+# formato_pausa = ". {nome}."  # ponto
+# formato_pausa = "<break time='500ms'/>{nome}<break time='500ms'/>"  # SSML
 ```
 
----
+## 📡 Webhook de Entrega
 
-## 📡 Webhook
+O vídeo final é enviado automaticamente para `WEBHOOK_URL`, contendo:
 
-O sistema envia para o webhook definido em `WEBHOOK_URL` no formato `multipart/form-data`, contendo:
-
-- `audio_base`: Arquivo de áudio base
-- `file`: Áudio gerado com o nome
-- `nome_original`: Nome do arquivo
+- `file`: Arquivo final `.mp4`
+- `nome`: Nome substituído
 - `user_id`: UUID do usuário
 
----
+## ✨ Melhorias Futuras
 
-## ✨ Futuras melhorias (sugestões)
-- Customização de voz
-- Dashboard para acompanhamento
-- Notificações por e-mail e whatsapp
-- Upload de nomes via `.csv`
-
----
+- Preview web do vídeo gerado
+- Suporte a múltiplas palavras-chave
+- Detecção automática de entonação
+- Ajuste visual na timeline de corte
 
 ## 📄 Licença
 
-Este projeto é livre para uso e modificação. Licenciado sob MIT License.
+Este projeto é licenciado sob a licença MIT.
