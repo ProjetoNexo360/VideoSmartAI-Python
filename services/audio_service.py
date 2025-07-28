@@ -87,7 +87,7 @@ async def verificar_ou_criar_voz(voz_padrao_nome: str, caminho_audio: str, pasta
             response_json = response.json()
             return response_json.get("voiceId") or response_json.get("voice_id") or response_json.get("voice", {}).get("voiceId")
 
-async def gerar_video_para_nome(nome: str, palavra_chave: str, transcricao: str, segmentos: List[dict], user_voice_id: str, caminho_video: str, caminho_audio: str, pasta_temp: str, user_id: UUID):
+async def gerar_video_para_nome(nome: str, palavra_chave: str, transcricao: str, segmentos: List[dict], user_voice_id: str, caminho_video: str, caminho_audio: str, pasta_temp: str, user_id: UUID, enviar_webhook: bool = True ):
     palavra_chave_lower = palavra_chave.lower()
 
     palavra_alvo = None
@@ -148,13 +148,16 @@ async def gerar_video_para_nome(nome: str, palavra_chave: str, transcricao: str,
         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-c:a", "aac", "-shortest", caminho_saida_video
     ], check=True)
 
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            with open(caminho_saida_video, "rb") as final_video:
-                files = {"file": (f"video_{nome}.mp4", final_video, "video/mp4")}
-                data = {"user_id": str(user_id), "nome": nome}
-                await client.post(WEBHOOK_URL, data=data, files=files)
-    except httpx.HTTPError as e:
-        print(f"Falha ao enviar vídeo para {nome}: {e}")
+    if enviar_webhook:
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                with open(caminho_saida_video, "rb") as final_video:
+                    files = {"file": (f"video_{nome}.mp4", final_video, "video/mp4")}
+                    data = {"user_id": str(user_id), "nome": nome}
+                    await client.post(WEBHOOK_URL, data=data, files=files)
+        except httpx.HTTPError as e:
+            print(f"Falha ao enviar vídeo para {nome}: {e}")
+
 
     print(f"Novo vídeo gerado e enviado para {nome}: {caminho_saida_video}")
+    return caminho_saida_video 
