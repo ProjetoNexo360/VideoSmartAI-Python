@@ -5,7 +5,7 @@ from uuid import UUID
 from services.audio_service import processar_video
 from io import BytesIO
 from fastapi.responses import StreamingResponse
-
+from services.audio_service import enviar_video_para_webhook
 
 
 app = FastAPI()
@@ -96,12 +96,18 @@ async def gerar_preview(
 
 @app.post("/confirmar-envio/{user_id}")
 async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks):
+    from redis_client import obter_preview, remover_preview
+    from services.audio_service import (
+        salvar_video_em_disco, extrair_audio_do_video,
+        gerar_video_para_nome
+    )
+
     dados = await obter_preview(user_id)
     if not dados:
         return JSONResponse(status_code=404, content={"error": "Nenhum preview encontrado ou expirado."})
 
     async def gerar_restante():
-        from services.audio_service import gerar_video_para_nome  # evita circular import
+        import httpx
         with tempfile.TemporaryDirectory() as pasta_temp:
             caminho_video = salvar_video_em_disco(
                 dados["video_bytes"].encode("latin1"),
@@ -110,10 +116,14 @@ async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks):
             )
             caminho_audio = extrair_audio_do_video(caminho_video, pasta_temp)
 
-            nomes = dados["nomes"]
-            for nome in nomes:
+            nomes_todos = dados["nomes"]
+            nomes_unicos = list(set(n.strip().lower() for n in nomes_todos))
+
+            videos_gerados = {}
+
+            for nome in nomes_unicos:
                 try:
-                    await gerar_video_para_nome(
+                    caminho = await gerar_video_para_nome(
                         nome=nome,
                         palavra_chave=dados["palavra_chave"],
                         transcricao=dados["transcricao"],
@@ -123,13 +133,20 @@ async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks):
                         caminho_audio=caminho_audio,
                         pasta_temp=pasta_temp,
                         user_id=user_id,
-                        enviar_webhook=True  # agora envia o vídeo
+                        enviar_webhook=False
                     )
+                    videos_gerados[nome] = caminho
                 except Exception as e:
-                    print(f"Erro ao processar {nome}: {e}")
+                    print(f"Erro ao gerar vídeo para {nome}: {e}")
+
+            for nome in nomes_todos:
+                nome_normalizado = nome.strip().lower()
+                caminho = videos_gerados.get(nome_normalizado)
+                if not caminho:
+                    continue
+                await enviar_video_para_webhook(caminho, nome, user_id)
 
         await remover_preview(user_id)
 
     background_tasks.add_task(gerar_restante)
     return JSONResponse(content={"message": "Processamento dos vídeos restantes iniciado."})
-

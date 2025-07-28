@@ -6,9 +6,11 @@ import difflib
 from typing import List
 from uuid import UUID
 import json
+import httpx
+from uuid import UUID
 
 API_BASE_URL = "http://localhost:3000"
-WEBHOOK_URL = "https://webhook.site/9db6623c-bc6a-4495-8089-e0299106283c"
+WEBHOOK_URL = "https://webhook.site/be466e19-cbe9-4664-aa03-85fc270d0ba3"
 HTTP_TIMEOUT = 120.0
 CONTEXTO_PALAVRAS = 3
 AJUSTE_MS = 150
@@ -149,15 +151,19 @@ async def gerar_video_para_nome(nome: str, palavra_chave: str, transcricao: str,
     ], check=True)
 
     if enviar_webhook:
-        try:
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                with open(caminho_saida_video, "rb") as final_video:
-                    files = {"file": (f"video_{nome}.mp4", final_video, "video/mp4")}
-                    data = {"user_id": str(user_id), "nome": nome}
-                    await client.post(WEBHOOK_URL, data=data, files=files)
-        except httpx.HTTPError as e:
-            print(f"Falha ao enviar vídeo para {nome}: {e}")
-
+        await enviar_video_para_webhook(caminho_saida_video, nome, user_id)
 
     print(f"Novo vídeo gerado e enviado para {nome}: {caminho_saida_video}")
     return caminho_saida_video 
+
+
+async def enviar_video_para_webhook(caminho_video: str, nome: str, user_id: UUID):
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            with open(caminho_video, "rb") as final_video:
+                files = {"file": (f"video_{nome}.mp4", final_video, "video/mp4")}
+                data = {"user_id": str(user_id), "nome": nome}
+                await client.post(WEBHOOK_URL, data=data, files=files)
+    except httpx.HTTPError as e:
+        print(f"Falha ao enviar vídeo para {nome}: {e}")
+
