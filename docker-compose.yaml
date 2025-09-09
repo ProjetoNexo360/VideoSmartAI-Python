@@ -1,6 +1,73 @@
-# docker-compose.yml
+version: "3.9"
+
 services:
+  postgres:
+    image: postgres:15
+    container_name: evo_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: evolution
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: evolution123
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   redis:
-    image: redis:latest
+    image: redis:7
+    container_name: evo_redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
+    # opcional: persitência com appendonly
+    # command: ["redis-server", "--appendonly", "yes"]
+
+  evolution-api:
+    image: atendai/evolution-api:latest
+    container_name: evolution-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8080:8080"          
+    environment:
+      # ===== API =====
+      SERVER_PORT: 8080
+      AUTHENTICATION_API_KEY: ">q-HN0pPZ#.#3l2rO+@NKQKmH-^7y)ZH.y0cOFKxbo%)}iLV1Wb1H*Qw{M!vd|<+"   # troque por sua chave forte
+
+      # ===== Banco de dados (obrigatório na v2) =====
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: "postgresql"
+      DATABASE_CONNECTION_URI: "postgresql://evolution:evolution123@postgres:5432/evolution"
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      DATABASE_SAVE_DATA_LABELS: "true"
+      DATABASE_SAVE_DATA_HISTORIC: "true"
+
+      # ===== Redis Cache (habilitado) =====
+      CACHE_LOCAL_ENABLED: "false"
+      CACHE_REDIS_ENABLED: "true"
+      # 👉 usa DB index 2 para isolar o cache da Evolution do resto da sua app
+      CACHE_REDIS_URI: "redis://redis:6379/2"
+      CACHE_REDIS_TTL: "604800"   # 7 dias (opcional)
+      CONFIG_SESSION_PHONE_VERSION: 2.3000.1026354025
+
+      NODE_ENV: production
+    volumes:
+      - evolution_instances:/evolution/instances
+
+volumes:
+  pgdata:
+  evolution_instances:
