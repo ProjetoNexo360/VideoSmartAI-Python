@@ -9,10 +9,12 @@ import json
 import unicodedata
 import base64
 import time
+import re
 
 # =====================
 # Config
 # =====================
+
 API_BASE_URL = os.getenv("ELEVEN_NODE_API", "https://api-elevenlabs-nodejs.onrender.com")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://webhook.site/150557f8-3946-478e-8013-d5fedf0e56f2")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "120.0"))
@@ -20,19 +22,17 @@ PALAVRAS_ANTES = int(os.getenv("PALAVRAS_ANTES", "2"))
 PALAVRAS_DEPOIS = int(os.getenv("PALAVRAS_DEPOIS", "0"))
 AJUSTE_MS = int(os.getenv("AJUSTE_MS", "150"))  # ms
 
-# Evolution API (globais; por usuário passaremos apenas a INSTANCE)
-EVO_BASE_DEFAULT     = os.getenv("EVO_BASE", "http://localhost:8080")
-EVO_APIKEY_DEFAULT   = os.getenv("EVO_APIKEY", ">q-HN0pPZ#.#3l2rO+@NKQKmH-^7y)ZH.y0cOFKxbo%)}iLV1Wb1H*Qw{M!vd|<+")
+# Evolution API
+EVO_BASE_DEFAULT     = os.getenv("EVO_BASE", "http://localhost:8080").rstrip("/")
+EVO_APIKEY_DEFAULT   = os.getenv("EVO_APIKEY", "")
 EVO_INSTANCE_DEFAULT = os.getenv("EVO_INSTANCE", "default")
+EVO_INTEGRATION      = os.getenv("EVO_INTEGRATION", "WHATSAPP-BAILEYS")  # exigido no create
 
-# Endpoints Evolution (v1 por padrão; com fallback automático para variante sem v1)
-EVO_CREATE_PATH  = os.getenv("EVO_CREATE_PATH",  "v1/instance/create")
-EVO_CONNECT_PATH = os.getenv("EVO_CONNECT_PATH", "v1/instance/connect")
-
-# (mantidos para compat; usados no status/logout com fallback também)
-EVO_START_PATH  = os.getenv("EVO_START_PATH",  "sessions/start")
-EVO_STATUS_PATH = os.getenv("EVO_STATUS_PATH", "sessions/status")
-EVO_LOGOUT_PATH = os.getenv("EVO_LOGOUT_PATH", "sessions/logout")
+# Rotas oficiais (sem /v1)
+EVO_CREATE_PATH   = "instance/create"        # POST
+EVO_CONNECT_PATH  = "instance/connect"       # GET /instance/connect/{instance}
+EVO_STATUS_PATH   = "instance/connection"    # GET /instance/connection/{instance}
+EVO_DELETE_PATH   = "instances"              # DELETE /instances/{instance}
 
 WHATSAPP_VIDEO_SIZE_LIMIT_BYTES = 100 * 1024 * 1024  # ~100 MB
 SEND_RETRIES = 2
@@ -41,6 +41,16 @@ SEND_BACKOFF_SEC = 2.0
 # =====================
 # Helpers
 # =====================
+
+def _evo_headers(include_json: bool = False) -> dict:
+    # Doc exige 'apikey'; manter também Authorization funciona em algumas builds
+    h = {
+        "apikey": EVO_APIKEY_DEFAULT,
+        "Authorization": f"Bearer {EVO_APIKEY_DEFAULT}",
+    }
+    if include_json:
+        h["Content-Type"] = "application/json"
+    return h
 
 def _normalize_token(s: str) -> str:
     if not s:
@@ -73,124 +83,151 @@ def _file_to_b64(path: str) -> str:
     b64 = _strip_data_uri(b64)
     return b64
 
-def _toggle_v1(path: str) -> str:
-    """Se começa com v1/ remove; senão, prefixa v1/."""
-    p = path.lstrip("/")
-    return p[3:] if p.startswith("v1/") else f"v1/{p}"
+def sanitize_username(name: str) -> str:
+    """
+    Gera um slug seguro para o nome do usuário:
+    - remove acentos
+    - mantém [a-z0-9] e separa grupos por '-'
+    - minúsculas
+    """
+    if not name:
+        return "user"
+    n = unicodedata.normalize("NFKD", name)
+    n = "".join(c for c in n if not unicodedata.combining(c))
+    n = n.lower()
+    # troca qualquer sequência não-alfanumérica por "-"
+    n = re.sub(r"[^a-z0-9]+", "-", n).strip("-")
+    return n or "user"
+
+def make_instance_name(user_name: str, user_id: UUID) -> str:
+    """
+    Concatena (nomeUsuario_uuid) garantindo um nome seguro.
+    - NÃO altera o UUID
+    - Mantém o padrão pedido: nomeUsuario_id
+    """
+    slug = sanitize_username(user_name)
+    return f"{slug}_{user_id}"
 
 async def _evo_post(path: str, payload: dict, evo_base: str | None = None):
-    """
-    POST com fallback: tenta 'path'. Se der 404, tenta a variante com/sem v1.
-    Obs.: para 'create', alguns ambientes retornam 400 quando a instância já existe.
-    """
-    headers = {"apikey": EVO_APIKEY_DEFAULT, "Content-Type": "application/json"}
-    base = (evo_base or EVO_BASE_DEFAULT).rstrip("/")
-    p = path.lstrip("/")
-    url = f"{base}/{p}"
+    url = f"{(evo_base or EVO_BASE_DEFAULT).rstrip('/')}/{path.lstrip('/')}"
+    headers = _evo_headers(include_json=True)
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code == 404:
-            # tenta variante com/sem v1
-            alt = _toggle_v1(p)
-            if alt != p:
-                resp2 = await client.post(f"{base}/{alt}", headers=headers, json=payload)
-                resp2.raise_for_status()
-                ct2 = resp2.headers.get("content-type", "")
-                return resp2.json() if ct2 and "application/json" in ct2 else resp2.text
-        # fora do 404, sobe status normalmente
         resp.raise_for_status()
         ct = resp.headers.get("content-type", "")
         return resp.json() if ct and "application/json" in ct else resp.text
 
 async def _evo_get(path: str, evo_base: str | None = None):
-    """
-    GET com fallback: tenta 'path'. Se der 404, tenta a variante com/sem v1.
-    """
-    headers = {"apikey": EVO_APIKEY_DEFAULT}
-    base = (evo_base or EVO_BASE_DEFAULT).rstrip("/")
-    p = path.lstrip("/")
-    url = f"{base}/{p}"
+    url = f"{(evo_base or EVO_BASE_DEFAULT).rstrip('/')}/{path.lstrip('/')}"
+    headers = _evo_headers()
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         resp = await client.get(url, headers=headers)
-        if resp.status_code == 404:
-            alt = _toggle_v1(p)
-            if alt != p:
-                resp2 = await client.get(f"{base}/{alt}", headers=headers)
-                resp2.raise_for_status()
-                ct2 = resp2.headers.get("content-type", "")
-                return resp2.json() if ct2 and "application/json" in ct2 else resp2.text
+        resp.raise_for_status()
+        ct = resp.headers.get("content-type", "")
+        return resp.json() if ct and "application/json" in ct else resp.text
+
+async def _evo_delete(path: str, evo_base: str | None = None):
+    url = f"{(evo_base or EVO_BASE_DEFAULT).rstrip('/')}/{path.lstrip('/')}"
+    headers = _evo_headers()
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.delete(url, headers=headers)
         resp.raise_for_status()
         ct = resp.headers.get("content-type", "")
         return resp.json() if ct and "application/json" in ct else resp.text
 
 # =====================
-# Evolution: sessão (create + connect/QR)
+# Evolution: criação/ conexão / status / logout
 # =====================
+
+async def evo_create_user_instance(user_name: str, user_id: UUID, evo_base: str | None = None) -> Dict[str, Any]:
+    """
+    Cria a instância fortemente vinculada ao usuário.
+    Nome: (nomeUsuario_uuid)
+    - Se já existir (403 "name in use"), apenas retorna o payload do erro para registro.
+    """
+    instance_name = make_instance_name(user_name, user_id)
+    payload = {
+        "instanceName": instance_name,
+        "integration": EVO_INTEGRATION,
+        # deixe sem qrcode aqui para separar claramente cadastro vs conexão
+        "qrcode": False,
+    }
+    try:
+        resp = await _evo_post(EVO_CREATE_PATH, payload, evo_base=evo_base)
+        return {"instance": instance_name, "create": resp}
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response else None
+        if status == 403:
+            # Já existe — OK para o nosso caso; retornamos info para log
+            try:
+                detail = e.response.json()
+            except Exception:
+                detail = {"raw": e.response.text if e.response else str(e)}
+            return {"instance": instance_name, "create": {"__status__": 403, "__error__": True, "response": detail}}
+        elif status == 400:
+            # integração inválida etc.
+            try:
+                detail = e.response.json()
+            except Exception:
+                detail = {"raw": e.response.text if e.response else str(e)}
+            raise RuntimeError(json.dumps({
+                "message": "Falha ao criar instância (verifique EVO_INTEGRATION).",
+                "instanceName": instance_name,
+                "integration_sent": EVO_INTEGRATION,
+                "create_return": detail
+            }, ensure_ascii=False))
+        raise
+
+async def evo_connect(instance: str, evo_base: str | None = None) -> Dict[str, Any] | str:
+    """
+    Apenas gera o QR/pairing para uma instância existente.
+    """
+    instance_name = (instance or "").strip()
+    if not instance_name:
+        raise ValueError("instance inválida.")
+    try:
+        return await _evo_get(f"{EVO_CONNECT_PATH}/{instance_name}", evo_base=evo_base)
+    except httpx.HTTPStatusError as e:
+        # 404 => nome errado/diferente no casing
+        detail = None
+        try:
+            detail = e.response.json()
+        except Exception:
+            pass
+        raise RuntimeError(json.dumps({
+            "message": "Instância não encontrada ao tentar connect(). Verifique o nome/casing.",
+            "instanceName": instance_name,
+            "connect_return": detail or (e.response.text if e.response else str(e))
+        }, ensure_ascii=False)) from e
 
 async def evo_start_session(instance: str, evo_base: str | None = None):
     """
-    Fluxo 'oficial' v1:
-      - POST /v1/instance/create { instanceName }
-      - GET  /v1/instance/connect/{instance}
-    Com fallback automático para variantes sem /v1.
-    Trata 400 na criação como "possível já existente" e segue para o connect.
+    **ATUAL**: NÃO cria mais instância aqui.
+    Apenas chama o connect (QR) para a instância informada.
+    Use evo_create_user_instance(nome, user_id) no cadastro do usuário.
     """
-    create_payload = {"instanceName": instance}
-    create_resp = None
-    try:
-        create_resp = await _evo_post(EVO_CREATE_PATH, create_payload, evo_base=evo_base)
-    except httpx.HTTPStatusError as e:
-        # Alguns ambientes retornam 400 mesmo para instância nova (variação da API).
-        # Se 400, seguimos adiante para o connect (pairing/qr).
-        if e.response is None or e.response.status_code != 400:
-            raise
-        try:
-            create_resp = e.response.json()
-        except Exception:
-            create_resp = {"error": "create_failed_400", "detail": e.response.text if e.response else str(e)}
-
-    # Busca o QR/pairing (connect)
-    connect_resp = await _evo_get(f"{EVO_CONNECT_PATH}/{instance}", evo_base=evo_base)
-    return {"instance": instance, "create": create_resp, "connect": connect_resp}
+    return {"instance": instance, "qr": await evo_connect(instance, evo_base=evo_base)}
 
 async def evo_status(instance: str, evo_base: str | None = None):
-    """
-    Tenta: /sessions/status/{instance} (v1 antigo)
-           /v1/instance/connection/{instance} (v1 atual)
-    """
-    # primeiro tenta o "novo" v1
+    instance_name = (instance or "").strip()
+    if not instance_name:
+        raise ValueError("instance inválida.")
     try:
-        return await _evo_get(f"v1/instance/connection/{instance}", evo_base=evo_base)
+        return await _evo_get(f"{EVO_STATUS_PATH}/{instance_name}", evo_base=evo_base)
     except httpx.HTTPStatusError as e:
-        if e.response is None or e.response.status_code != 404:
-            raise
-    # fallback para builds legadas
-    return await _evo_get(f"{EVO_STATUS_PATH}/{instance}", evo_base=evo_base)
+        if e.response is not None and e.response.status_code == 404:
+            raise RuntimeError(json.dumps({
+                "message": "Instância não encontrada no status(). Verifique se o nome está correto (case-sensitive).",
+                "instanceName": instance_name
+            }, ensure_ascii=False)) from e
+        raise
 
 async def evo_logout(instance: str, evo_base: str | None = None):
-    """
-    Tenta: POST /sessions/logout (legacy) e DELETE /v1/instances/{instance} (v1 atual)
-    """
-    # tenta legacy
-    try:
-        return await _evo_post(EVO_LOGOUT_PATH, {"instanceName": instance}, evo_base=evo_base)
-    except httpx.HTTPStatusError as e:
-        if e.response is None or e.response.status_code != 404:
-            raise
-    # tenta v1 atual
-    headers = {"apikey": EVO_APIKEY_DEFAULT}
-    base = (evo_base or EVO_BASE_DEFAULT).rstrip("/")
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.delete(f"{base}/v1/instances/{instance}", headers=headers)
-        if resp.status_code == 404:
-            # fallback sem v1
-            resp2 = await client.delete(f"{base}/instances/{instance}", headers=headers)
-            resp2.raise_for_status()
-            ct2 = resp2.headers.get("content-type", "")
-            return resp2.json() if ct2 and "application/json" in ct2 else resp2.text
-        resp.raise_for_status()
-        ct = resp.headers.get("content-type", "")
-        return resp.json() if ct and "application/json" in ct else resp.text
+    instance_name = (instance or "").strip()
+    if not instance_name:
+        raise ValueError("instance inválida.")
+    # DELETE /instances/{instance}
+    return await _evo_delete(f"{EVO_DELETE_PATH}/{instance_name}", evo_base=evo_base)
 
 # =====================
 # Evolution: Mensagens (Texto & Mídia)
@@ -223,7 +260,6 @@ async def enviar_texto_via_whatsapp(
         }
         for attempt in range(SEND_RETRIES + 1):
             try:
-                # tenta sem v1; se 404, _evo_post reenvia com v1 automaticamente
                 return await _evo_post(
                     f"message/sendText/{(evo_instance or EVO_INSTANCE_DEFAULT)}",
                     payload, evo_base=evo_base

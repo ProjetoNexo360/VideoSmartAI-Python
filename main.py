@@ -17,7 +17,8 @@ from services.audio_service import (
     transcrever_audio_com_timestamps, verificar_ou_criar_voz, gerar_video_para_nome,
     enviar_video_para_webhook,
     enviar_texto_via_whatsapp, enviar_video_via_whatsapp,
-    evo_start_session, evo_status, evo_logout
+    evo_start_session, evo_status, evo_logout,
+    evo_create_user_instance, make_instance_name  # <--- ADICIONE
 )
 from redis_client import salvar_preview, obter_preview, remover_preview
 
@@ -59,16 +60,46 @@ def parse_contatos(contatos_json: str):
 # AUTH
 # ==========================================================
 @app.post("/auth/register")
-def register(email: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+async def register(
+    nome: str = Form(...),                       # <--- ADICIONE
+    email: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db)
+):
     email = email.strip().lower()
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="E-mail já cadastrado.")
-    user = User(email=email, password_hash=hash_password(password))
+
+    # cria o usuário (o id já é UUID no seu modelo)
+    user = User(name=nome.strip(), email=email, password_hash=hash_password(password))
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    # cria e vincula a instância Evolution com padrão nomeUsuario_uuid
+    try:
+        # cria remotamente (se já existir, tudo bem — tratamos o 403 na service)
+        await evo_create_user_instance(user.name, user.id)
+        # define o nome localmente e persiste
+        user.evo_instance = make_instance_name(user.name, user.id)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    except Exception as e:
+        # se falhar criar a instância, ainda devolvemos o token,
+        # mas avisamos o cliente para tentar o /evo/start depois
+        # (ou você pode optar por retornar 500 aqui)
+        print(f"[WARN] Falha ao criar instância Evolution para user={user.id}: {e}")
+
     token = create_access_token(user.id, user.email)
-    return {"access_token": token, "token_type": "bearer", "user_id": user.id}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": user.id,
+        "name": user.name,
+        "evo_instance": user.evo_instance
+    }
+
 
 @app.post("/auth/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
@@ -85,6 +116,7 @@ def me(current_user: User = Depends(get_current_user)):
     return {
         "id": current_user.id,
         "email": current_user.email,
+        "name": current_user.name,                 # <--- ADICIONE
         "evo_instance": current_user.evo_instance
     }
 
@@ -92,16 +124,22 @@ def me(current_user: User = Depends(get_current_user)):
 # EVOLUTION API (QR / Status / Logout) - por usuário
 # ==========================================================
 @app.post("/evo/start")
-async def evo_start(instance: str = Form(...),
-                    current_user: User = Depends(get_current_user),
-                    db: Session = Depends(get_db)):
-    # Dispara a criação da sessão e retorna QR
-    data = await evo_start_session(instance)
-    # Salva a instance no usuário
-    current_user.evo_instance = instance
-    db.add(current_user)
-    db.commit()
-    return {"instance": instance, "qr": data}
+async def evo_start(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not current_user.evo_instance:
+        # fallback: caso cadastro não tenha conseguido criar a instância
+        # criamos aqui para garantir o vínculo
+        await evo_create_user_instance(current_user.name, current_user.id)
+        current_user.evo_instance = make_instance_name(current_user.name, current_user.id)
+        db.add(current_user)
+        db.commit()
+        db.refresh(current_user)
+
+    data = await evo_start_session(current_user.evo_instance)  # só CONNECT/QR
+    return {"instance": current_user.evo_instance, "qr": data["qr"]}
+
 
 @app.get("/evo/status")
 async def evo_get_status(current_user: User = Depends(get_current_user)):
