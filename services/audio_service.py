@@ -15,7 +15,20 @@ import re
 # Config
 # =====================
 
-API_BASE_URL = os.getenv("ELEVEN_NODE_API", "https://api-elevenlabs-nodejs.onrender.com")
+# ---- Eleven: base só com /api; namespace separado e configurável ----
+API_BASE_ROOT = os.getenv("ELEVEN_NODE_API", "https://api-elevenlabs-nodejs.onrender.com/api").rstrip("/")
+ELEVEN_API_NS = (os.getenv("ELEVEN_API_NAMESPACE", "/elevenlabs") or "").strip()
+ELEVEN_AUTH_URL = os.getenv("ELEVEN_AUTH_URL", "https://api-elevenlabs-nodejs.onrender.com/api/auth/login").strip()
+ELEVEN_USERNAME = os.getenv("ELEVEN_USERNAME", "").strip()
+ELEVEN_PASSWORD = os.getenv("ELEVEN_PASSWORD", "").strip()
+
+# ---- Heygen: pronto para uso futuro (mesma abordagem) ----
+HEYGEN_BASE_ROOT = os.getenv("HEYGEN_NODE_API", "https://api-heygen-nodejs.onrender.com/api").rstrip("/")
+HEYGEN_API_NS = (os.getenv("HEYGEN_API_NAMESPACE", "/heygen") or "").strip()
+HEYGEN_AUTH_URL = os.getenv("HEYGEN_AUTH_URL", "https://api-heygen-nodejs.onrender.com/api/auth/login").strip()
+HEYGEN_USERNAME = os.getenv("HEYGEN_USERNAME", "").strip()
+HEYGEN_PASSWORD = os.getenv("HEYGEN_PASSWORD", "").strip()
+
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://webhook.site/150557f8-3946-478e-8013-d5fedf0e56f2")
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "120.0"))
 PALAVRAS_ANTES = int(os.getenv("PALAVRAS_ANTES", "2"))
@@ -108,6 +121,10 @@ def make_instance_name(user_name: str, user_id: UUID) -> str:
     slug = sanitize_username(user_name)
     return f"{slug}_{user_id}"
 
+# =====================
+# Evolution HTTP helpers
+# =====================
+
 async def _evo_post(path: str, payload: dict, evo_base: str | None = None):
     url = f"{(evo_base or EVO_BASE_DEFAULT).rstrip('/')}/{path.lstrip('/')}"
     headers = _evo_headers(include_json=True)
@@ -136,20 +153,160 @@ async def _evo_delete(path: str, evo_base: str | None = None):
         return resp.json() if ct and "application/json" in ct else resp.text
 
 # =====================
+# Auth helpers (Eleven / Heygen)
+# =====================
+
+# ---- Eleven ----
+_eleven_token: str | None = None
+_eleven_token_expire_ts: float = 0.0  # epoch seconds
+
+def _eleven_url(path: str) -> str:
+    """
+    Monta URL de recurso Eleven a partir do root /api e namespace configurável.
+    Ex.: /speech-to-text => https://host/api/<ns>/speech-to-text
+    """
+    base = API_BASE_ROOT.rstrip("/")
+    ns = (ELEVEN_API_NS or "").strip()
+    if ns and not ns.startswith("/"):
+        ns = "/" + ns
+    return f"{base}{ns}/{path.lstrip('/')}"
+
+async def _eleven_login(force: bool = False) -> str:
+    """
+    Faz login na API Eleven e devolve o token (cacheado). Renova se expirado/force.
+    """
+    global _eleven_token, _eleven_token_expire_ts
+    now = time.time()
+    SAFETY_TTL = 50 * 60  # 50 minutos
+
+    if not force and _eleven_token and now < _eleven_token_expire_ts:
+        return _eleven_token
+
+    if not ELEVEN_USERNAME or not ELEVEN_PASSWORD:
+        raise RuntimeError("Credenciais Eleven não configuradas (ELEVEN_USERNAME / ELEVEN_PASSWORD).")
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.post(
+            ELEVEN_AUTH_URL,
+            json={"username": ELEVEN_USERNAME, "password": ELEVEN_PASSWORD},
+            headers={"Content-Type": "application/json"}
+        )
+        resp.raise_for_status()
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+
+    token = (
+        data.get("token")
+        or data.get("access_token")
+        or data.get("accessToken")
+        or data.get("jwt")
+    )
+    if not token:
+        if isinstance(data, str) and data.strip():
+            token = data.strip()
+        else:
+            raise RuntimeError(f"Login Eleven não retornou token. Resposta: {data!r}")
+
+    _eleven_token = token
+    _eleven_token_expire_ts = now + SAFETY_TTL
+    return _eleven_token
+
+async def _eleven_headers(include_json: bool = False) -> dict:
+    token = await _eleven_login()
+    h = {"Authorization": f"Bearer {token}"}
+    if include_json:
+        h["Content-Type"] = "application/json"
+    return h
+
+async def _eleven_request(method: str, url: str, **kwargs) -> httpx.Response:
+    """
+    Faz requisição autenticada; se 401, renova token e tenta de novo (1x).
+    """
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.request(method, url, **kwargs)
+        if resp.status_code == 401:
+            await _eleven_login(force=True)
+            headers = kwargs.get("headers", {}) or {}
+            headers["Authorization"] = f"Bearer {_eleven_token}"
+            kwargs["headers"] = headers
+            resp = await client.request(method, url, **kwargs)
+        resp.raise_for_status()
+        return resp
+
+# ---- Heygen (preparado para uso futuro) ----
+_heygen_token: str | None = None
+_heygen_token_expire_ts: float = 0.0
+
+def _heygen_url(path: str) -> str:
+    base = HEYGEN_BASE_ROOT.rstrip("/")
+    ns = (HEYGEN_API_NS or "").strip()
+    if ns and not ns.startswith("/"):
+        ns = "/" + ns
+    return f"{base}{ns}/{path.lstrip('/')}"
+
+async def _heygen_login(force: bool = False) -> str:
+    global _heygen_token, _heygen_token_expire_ts
+    now = time.time()
+    SAFETY_TTL = 50 * 60
+
+    if not force and _heygen_token and now < _heygen_token_expire_ts:
+        return _heygen_token
+
+    if not HEYGEN_USERNAME or not HEYGEN_PASSWORD:
+        raise RuntimeError("Credenciais Heygen não configuradas (HEYGEN_USERNAME / HEYGEN_PASSWORD).")
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.post(
+            HEYGEN_AUTH_URL,
+            json={"username": HEYGEN_USERNAME, "password": HEYGEN_PASSWORD},
+            headers={"Content-Type": "application/json"}
+        )
+        resp.raise_for_status()
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+
+    token = (
+        data.get("token")
+        or data.get("access_token")
+        or data.get("accessToken")
+        or data.get("jwt")
+    )
+    if not token:
+        if isinstance(data, str) and data.strip():
+            token = data.strip()
+        else:
+            raise RuntimeError(f"Login Heygen não retornou token. Resposta: {data!r}")
+
+    _heygen_token = token
+    _heygen_token_expire_ts = now + SAFETY_TTL
+    return _heygen_token
+
+async def _heygen_headers(include_json: bool = False) -> dict:
+    token = await _heygen_login()
+    h = {"Authorization": f"Bearer {token}"}
+    if include_json:
+        h["Content-Type"] = "application/json"
+    return h
+
+async def _heygen_request(method: str, url: str, **kwargs) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.request(method, url, **kwargs)
+        if resp.status_code == 401:
+            await _heygen_login(force=True)
+            headers = kwargs.get("headers", {}) or {}
+            headers["Authorization"] = f"Bearer {_heygen_token}"
+            kwargs["headers"] = headers
+            resp = await client.request(method, url, **kwargs)
+        resp.raise_for_status()
+        return resp
+
+# =====================
 # Evolution: criação/ conexão / status / logout
 # =====================
 
 async def evo_create_user_instance(user_name: str, user_id: UUID, evo_base: str | None = None) -> Dict[str, Any]:
-    """
-    Cria a instância fortemente vinculada ao usuário.
-    Nome: (nomeUsuario_uuid)
-    - Se já existir (403 "name in use"), apenas retorna o payload do erro para registro.
-    """
     instance_name = make_instance_name(user_name, user_id)
     payload = {
         "instanceName": instance_name,
         "integration": EVO_INTEGRATION,
-        # deixe sem qrcode aqui para separar claramente cadastro vs conexão
         "qrcode": False,
     }
     try:
@@ -158,14 +315,12 @@ async def evo_create_user_instance(user_name: str, user_id: UUID, evo_base: str 
     except httpx.HTTPStatusError as e:
         status = e.response.status_code if e.response else None
         if status == 403:
-            # Já existe — OK para o nosso caso; retornamos info para log
             try:
                 detail = e.response.json()
             except Exception:
                 detail = {"raw": e.response.text if e.response else str(e)}
             return {"instance": instance_name, "create": {"__status__": 403, "__error__": True, "response": detail}}
         elif status == 400:
-            # integração inválida etc.
             try:
                 detail = e.response.json()
             except Exception:
@@ -179,16 +334,12 @@ async def evo_create_user_instance(user_name: str, user_id: UUID, evo_base: str 
         raise
 
 async def evo_connect(instance: str, evo_base: str | None = None) -> Dict[str, Any] | str:
-    """
-    Apenas gera o QR/pairing para uma instância existente.
-    """
     instance_name = (instance or "").strip()
     if not instance_name:
         raise ValueError("instance inválida.")
     try:
         return await _evo_get(f"{EVO_CONNECT_PATH}/{instance_name}", evo_base=evo_base)
     except httpx.HTTPStatusError as e:
-        # 404 => nome errado/diferente no casing
         detail = None
         try:
             detail = e.response.json()
@@ -201,11 +352,6 @@ async def evo_connect(instance: str, evo_base: str | None = None) -> Dict[str, A
         }, ensure_ascii=False)) from e
 
 async def evo_start_session(instance: str, evo_base: str | None = None):
-    """
-    **ATUAL**: NÃO cria mais instância aqui.
-    Apenas chama o connect (QR) para a instância informada.
-    Use evo_create_user_instance(nome, user_id) no cadastro do usuário.
-    """
     return {"instance": instance, "qr": await evo_connect(instance, evo_base=evo_base)}
 
 async def evo_status(instance: str, evo_base: str | None = None):
@@ -226,7 +372,6 @@ async def evo_logout(instance: str, evo_base: str | None = None):
     instance_name = (instance or "").strip()
     if not instance_name:
         raise ValueError("instance inválida.")
-    # DELETE /instances/{instance}
     return await _evo_delete(f"{EVO_DELETE_PATH}/{instance_name}", evo_base=evo_base)
 
 # =====================
@@ -410,19 +555,23 @@ def extrair_audio_do_video(caminho_video: str, pasta_temp: str) -> str:
     return caminho_audio
 
 # =====================
-# STT / Voz / Vídeo
+# STT / Voz / Vídeo (Eleven)
 # =====================
 
 async def transcrever_audio_com_timestamps(caminho_audio: str) -> Tuple[str, List[Dict[str, Any]]]:
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        with open(caminho_audio, "rb") as audio_file:
-            files = {"file": ("original.wav", audio_file, "audio/wav")}
-            response = await client.post(f"{API_BASE_URL}/speech-to-text?detailed=true", files=files)
-            response.raise_for_status()
-            try:
-                response_json = response.json()
-            except json.JSONDecodeError:
-                raise ValueError("Resposta da API de transcrição não é um JSON válido.")
+    with open(caminho_audio, "rb") as audio_file:
+        files = {"file": ("original.wav", audio_file, "audio/wav")}
+        headers = await _eleven_headers()
+        response = await _eleven_request(
+            "POST",
+            _eleven_url("speech-to-text?detailed=true"),
+            files=files,
+            headers=headers
+        )
+        try:
+            response_json = response.json()
+        except json.JSONDecodeError:
+            raise ValueError("Resposta da API de transcrição não é um JSON válido.")
 
     transcricao = (
         response_json.get("text", "")
@@ -454,36 +603,37 @@ async def transcrever_audio_com_timestamps(caminho_audio: str) -> Tuple[str, Lis
     return transcricao, segmentos
 
 async def verificar_ou_criar_voz(voz_padrao_nome: str, caminho_audio: str, pasta_temp: str) -> str:
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        response = await client.get(f"{API_BASE_URL}/voices")
-        response.raise_for_status()
-        vozes = response.json()
-        for voz in vozes:
-            if voz.get("name") == voz_padrao_nome:
-                return voz.get("voiceId") or voz.get("voice_id")
+    headers = await _eleven_headers()
+    response = await _eleven_request("GET", _eleven_url("voices"), headers=headers)
+    vozes = response.json()
+    for voz in vozes:
+        if voz.get("name") == voz_padrao_nome:
+            return voz.get("voiceId") or voz.get("voice_id")
 
     caminho_convertido = os.path.join(pasta_temp, "converted_audio.wav")
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        with open(caminho_audio, "rb") as audio_file:
-            files = {"file": ("original.wav", audio_file, "audio/wav")}
-            response = await client.post(f"{API_BASE_URL}/convert-audio", files=files)
-            response.raise_for_status()
-            with open(caminho_convertido, "wb") as out_file:
-                out_file.write(response.content)
+    with open(caminho_audio, "rb") as audio_file:
+        files = {"file": ("original.wav", audio_file, "audio/wav")}
+        response = await _eleven_request("POST", _eleven_url("convert-audio"), files=files, headers=headers)
+        with open(caminho_convertido, "wb") as out_file:
+            out_file.write(response.content)
 
     with open(caminho_convertido, "rb") as converted_file:
         files = [("file", ("converted_audio.wav", converted_file, "audio/wav"))]
         data = {"name": voz_padrao_nome, "language": "pt-BR"}
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            response = await client.post(f"{API_BASE_URL}/add-voice", data=data, files=files)
-            response.raise_for_status()
-            response_json = response.json()
-            vid = (
-                response_json.get("voiceId")
-                or response_json.get("voice_id")
-                or response_json.get("voice", {}).get("voiceId")
-            )
-            return vid
+        response = await _eleven_request(
+            "POST",
+            _eleven_url("add-voice"),
+            data=data,
+            files=files,
+            headers=headers
+        )
+        response_json = response.json()
+        vid = (
+            response_json.get("voiceId")
+            or response_json.get("voice_id")
+            or response_json.get("voice", {}).get("voiceId")
+        )
+        return vid
 
 async def gerar_video_para_nome(
     nome: str,
@@ -532,12 +682,11 @@ async def gerar_video_para_nome(
     novo_texto = texto_original.replace(palavra_alvo["text"], nome_formatado)
 
     payload = {"voiceId": user_voice_id, "text": novo_texto}
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        tts_resp = await client.post(f"{API_BASE_URL}/text-to-speech", json=payload)
-        tts_resp.raise_for_status()
-        caminho_trecho_ia = os.path.join(pasta_temp, f"ia_{nome}.mp3")
-        with open(caminho_trecho_ia, "wb") as f:
-            f.write(tts_resp.content)
+    headers = await _eleven_headers(include_json=True)
+    tts_resp = await _eleven_request("POST", _eleven_url("text-to-speech"), json=payload, headers=headers)
+    caminho_trecho_ia = os.path.join(pasta_temp, f"ia_{nome}.mp3")
+    with open(caminho_trecho_ia, "wb") as f:
+        f.write(tts_resp.content)
 
     caminho_audio_antes = os.path.join(pasta_temp, "antes.wav")
     caminho_audio_depois = os.path.join(pasta_temp, "depois.wav")
