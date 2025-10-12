@@ -18,7 +18,8 @@ from services.audio_service import (
     enviar_video_para_webhook,
     enviar_texto_via_whatsapp, enviar_video_via_whatsapp,
     evo_start_session, evo_status, evo_logout,
-    evo_create_user_instance, make_instance_name  # <--- ADICIONE
+    evo_create_user_instance, make_instance_name,
+    heygen_verificar_ou_criar_avatar_do_usuario,   # <- ADICIONADO
 )
 from redis_client import salvar_preview, obter_preview, remover_preview
 
@@ -38,6 +39,20 @@ def health():
 # ---------------------------
 # Validação simples de contatos
 # ---------------------------
+
+async def salvar_group_id_no_banco(user_id: UUID, group_id: str):
+    """Callback assíncrono para persistir o heygen_group_id no usuário."""
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            user.heygen_group_id = group_id
+            db.add(user)
+            db.commit()
+    finally:
+        db.close()
+
+
 def parse_contatos(contatos_json: str):
     try:
         raw = json.loads(contatos_json)
@@ -61,7 +76,7 @@ def parse_contatos(contatos_json: str):
 # ==========================================================
 @app.post("/auth/register")
 async def register(
-    nome: str = Form(...),                       # <--- ADICIONE
+    nome: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
     db: Session = Depends(get_db)
@@ -88,7 +103,6 @@ async def register(
     except Exception as e:
         # se falhar criar a instância, ainda devolvemos o token,
         # mas avisamos o cliente para tentar o /evo/start depois
-        # (ou você pode optar por retornar 500 aqui)
         print(f"[WARN] Falha ao criar instância Evolution para user={user.id}: {e}")
 
     token = create_access_token(user.id, user.email)
@@ -116,8 +130,9 @@ def me(current_user: User = Depends(get_current_user)):
     return {
         "id": current_user.id,
         "email": current_user.email,
-        "name": current_user.name,                 # <--- ADICIONE
-        "evo_instance": current_user.evo_instance
+        "name": current_user.name,
+        "evo_instance": current_user.evo_instance,
+        "heygen_group_id": current_user.heygen_group_id,  # <- exposto p/ cliente
     }
 
 # ==========================================================
@@ -185,8 +200,10 @@ async def gerar_videos(
         palavra_chave=palavra_chave,
         video_bytes=video_bytes,
         nome_video=nome_video,
-        evo_instance=current_user.evo_instance,   # usa a instância do usuário
-        evo_base=None
+        evo_instance=current_user.evo_instance,
+        evo_base=None,
+        heygen_group_id=current_user.heygen_group_id,        # <- reusa o group_id do user se existir
+        save_group_id_async=salvar_group_id_no_banco,        # <- persiste se criar
     )
     return JSONResponse(content={
         "message": "Processamento iniciado",
@@ -221,6 +238,20 @@ async def gerar_preview(
         transcricao, segmentos = await transcrever_audio_com_timestamps(caminho_audio)
         user_voice_id = await verificar_ou_criar_voz(f"user_{user_id}", caminho_audio, pasta_temp)
 
+        # NOVO: garantir avatar Heygen e obter talking_photo_id
+        avatar_group_name = f"user_{user_id}"
+        talking_photo_id = await heygen_verificar_ou_criar_avatar_do_usuario(
+            user_group_name=avatar_group_name,
+            source_video=caminho_video,
+            segmentos=segmentos,
+            palavra_chave=palavra_chave,
+            pasta_temp=pasta_temp,
+            num_fotos=10,
+            user_id=user_id,
+            existing_group_id=current_user.heygen_group_id,   # reusa se já tiver
+            save_group_id_async=salvar_group_id_no_banco,     # persiste se criar
+        )
+
         caminho_saida_preview = await gerar_video_para_nome(
             nome=primeiro["nome"],
             palavra_chave=palavra_chave,
@@ -231,6 +262,7 @@ async def gerar_preview(
             caminho_audio=caminho_audio,
             pasta_temp=pasta_temp,
             user_id=user_id,
+            talking_photo_id=talking_photo_id,                # <- PASSA O TID
             enviar_webhook=False
         )
 
@@ -246,8 +278,9 @@ async def gerar_preview(
             "voice_id": user_voice_id,
             "video_bytes": video_bytes.decode("latin1"),
             "nome_video": nome_video,
-            # guardo a instância do usuário no momento do preview
-            "evo_instance": current_user.evo_instance
+            "evo_instance": current_user.evo_instance,   # instância do usuário
+            "talking_photo_id": talking_photo_id,        # <- ADICIONADO
+            "heygen_group_id": current_user.heygen_group_id,  # <- opcional/debug
         })
 
     return StreamingResponse(BytesIO(conteudo_video), media_type="video/mp4", headers={
@@ -277,6 +310,21 @@ async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks, curr
             )
             caminho_audio = extrair_audio_do_video(caminho_video, pasta_temp)
 
+            # NOVO: garantir talking_photo_id (reusar o salvo; se faltar, criar/reusar agora)
+            talking_photo_id = dados.get("talking_photo_id")
+            if not talking_photo_id:
+                talking_photo_id = await heygen_verificar_ou_criar_avatar_do_usuario(
+                    user_group_name=f"user_{user_id}",
+                    source_video=caminho_video,
+                    segmentos=dados["segmentos"],
+                    palavra_chave=dados["palavra_chave"],
+                    pasta_temp=pasta_temp,
+                    num_fotos=10,
+                    user_id=user_id,
+                    existing_group_id=dados.get("heygen_group_id") or current_user.heygen_group_id,
+                    save_group_id_async=salvar_group_id_no_banco,
+                )
+
             contatos_todos = dados["contatos"]
 
             def _norm(s: str) -> str: return s.strip().casefold()
@@ -299,6 +347,7 @@ async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks, curr
                         caminho_audio=caminho_audio,
                         pasta_temp=pasta_temp,
                         user_id=user_id,
+                        talking_photo_id=talking_photo_id,  # <- REUSA O MESMO TID
                         enviar_webhook=False
                     )
                     videos[k] = caminho
