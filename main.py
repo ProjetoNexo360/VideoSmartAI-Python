@@ -4,8 +4,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from uuid import UUID
 from io import BytesIO
+from typing import Optional
 import json
 import tempfile
+import os
 from sqlalchemy.orm import Session
 
 from database import Base, engine, SessionLocal
@@ -18,7 +20,9 @@ from services.audio_service import (
     enviar_video_para_webhook,
     enviar_texto_via_whatsapp, enviar_video_via_whatsapp,
     evo_start_session, evo_status, evo_logout,
-    evo_create_user_instance, make_instance_name  # <--- ADICIONE
+    evo_create_user_instance, make_instance_name,
+    heygen_verificar_ou_criar_avatar_do_usuario, heygen_group_train, heygen_verificar_status_treino,
+    overlay_clip_on_interval, _ffmpeg_obter_duracao, _ffmpeg_obter_propriedades
 )
 from redis_client import salvar_preview, obter_preview, remover_preview
 
@@ -205,6 +209,7 @@ async def gerar_preview(
     contatos: str = Form(..., description='JSON: [{"nome":"...","telefone":"..."}, ...]'),
     palavra_chave: str = Form(...),
     video: UploadFile = File(...),
+    min_video_duration: Optional[float] = Form(None, description="Duração mínima do vídeo em segundos (padrão: 5.0)"),
     current_user: User = Depends(get_current_user)
 ):
     if not current_user.evo_instance:
@@ -221,6 +226,21 @@ async def gerar_preview(
         transcricao, segmentos = await transcrever_audio_com_timestamps(caminho_audio)
         user_voice_id = await verificar_ou_criar_voz(f"user_{user_id}", caminho_audio, pasta_temp)
 
+        # Cria/verifica grupo de avatar e inicia treino assíncrono
+        avatar_group_name = f"user_{user_id}"
+        group_id = await heygen_verificar_ou_criar_avatar_do_usuario(
+            user_group_name=avatar_group_name,
+            source_video=caminho_video,
+            segmentos=segmentos,
+            palavra_chave=palavra_chave,
+            pasta_temp=pasta_temp,
+            num_fotos=10
+        )
+        
+        # Inicia treino assíncrono (waitForCompleted=false)
+        # Usa muitas tentativas (10) com delay maior (3s) para garantir que o treino seja iniciado
+        train_response = await heygen_group_train(group_id, max_retries=10, retry_delay=3.0)
+
         caminho_saida_preview = await gerar_video_para_nome(
             nome=primeiro["nome"],
             palavra_chave=palavra_chave,
@@ -231,13 +251,15 @@ async def gerar_preview(
             caminho_audio=caminho_audio,
             pasta_temp=pasta_temp,
             user_id=user_id,
-            enviar_webhook=False
+            group_id=group_id,
+            enviar_webhook=False,
+            min_video_duration=min_video_duration
         )
 
         with open(caminho_saida_preview, "rb") as f:
             conteudo_video = f.read()
 
-        # Salva estado para confirmar depois
+        # Salva estado para confirmar depois (inclui group_id e train_response)
         await salvar_preview(user_id, {
             "contatos": contatos_lista,
             "palavra_chave": palavra_chave,
@@ -246,6 +268,9 @@ async def gerar_preview(
             "voice_id": user_voice_id,
             "video_bytes": video_bytes.decode("latin1"),
             "nome_video": nome_video,
+            "group_id": group_id,
+            "train_response": train_response,  # Resposta do train para verificar depois
+            "min_video_duration": min_video_duration,  # Duração mínima configurada
             # guardo a instância do usuário no momento do preview
             "evo_instance": current_user.evo_instance
         })
@@ -269,6 +294,36 @@ async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks, curr
 
     async def gerar_restante():
         import tempfile
+        import asyncio
+        
+        # Polling do status do treino (retry infinito até completar)
+        group_id = dados.get("group_id")
+        if group_id:
+            print(f"[HEYGEN] Verificando status do treino para group_id={group_id}...")
+            treino_completo = False
+            tentativa = 0
+            while not treino_completo:
+                treino_completo = await heygen_verificar_status_treino(group_id)
+                if treino_completo:
+                    print(f"[HEYGEN] Treino completo após {tentativa + 1} tentativa(s)")
+                    break
+                
+                # Define intervalo baseado no número da tentativa
+                if tentativa == 0:
+                    wait_time = 3.0  # Primeiro retry: 3 segundos
+                elif tentativa == 1:
+                    wait_time = 5.0  # Segundo retry: 5 segundos
+                elif tentativa == 2:
+                    wait_time = 10.0  # Terceiro retry: 10 segundos
+                else:
+                    wait_time = 20.0  # Do quarto em diante: 20 segundos
+                
+                tentativa += 1
+                print(f"[HEYGEN] Tentativa {tentativa}: treino ainda não completo, aguardando {wait_time}s...")
+                await asyncio.sleep(wait_time)
+        else:
+            print(f"[HEYGEN] WARNING: group_id não encontrado nos dados do preview")
+        
         with tempfile.TemporaryDirectory() as pasta_temp:
             caminho_video = salvar_video_em_disco(
                 dados["video_bytes"].encode("latin1"),
@@ -299,7 +354,9 @@ async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks, curr
                         caminho_audio=caminho_audio,
                         pasta_temp=pasta_temp,
                         user_id=user_id,
-                        enviar_webhook=False
+                        group_id=group_id,  # Passa group_id do preview
+                        enviar_webhook=False,
+                        min_video_duration=dados.get("min_video_duration")  # Usa o mesmo valor do preview, se disponível
                     )
                     videos[k] = caminho
                 except Exception as e:
@@ -326,3 +383,98 @@ async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks, curr
 
     background_tasks.add_task(gerar_restante)
     return JSONResponse(content={"message": "Processamento e envios iniciados.", "evo_instance": evo_instance})
+
+# ==========================================================
+# POST /teste-overlay - Endpoint de teste para overlay sem gastar créditos
+# ==========================================================
+@app.post("/teste-overlay")
+async def teste_overlay(
+    video_original: UploadFile = File(..., description="Vídeo original"),
+    video_inserir: UploadFile = File(..., description="Vídeo para inserir como overlay"),
+    start_s: float = Form(5.0, description="Tempo de início em segundos"),
+    end_s: float = Form(10.0, description="Tempo de fim em segundos"),
+    overlay_x: str = Form("(W-w)/2", description="Posição X do overlay (padrão: centro)"),
+    overlay_y: str = Form("H-h-40", description="Posição Y do overlay (padrão: rodapé)"),
+    scale_w: Optional[int] = Form(720, description="Largura do overlay (padrão: 720)")
+):
+    """
+    Endpoint de teste para testar a funcionalidade de overlay sem gastar créditos.
+    Recebe dois vídeos e aplica overlay no intervalo especificado.
+    """
+    try:
+        # Lê os vídeos
+        video_original_bytes = await video_original.read()
+        video_inserir_bytes = await video_inserir.read()
+        
+        with tempfile.TemporaryDirectory() as pasta_temp:
+            # Salva os vídeos em disco
+            caminho_original = salvar_video_em_disco(
+                video_original_bytes,
+                video_original.filename or "original.mp4",
+                pasta_temp
+            )
+            caminho_inserir = salvar_video_em_disco(
+                video_inserir_bytes,
+                video_inserir.filename or "inserir.mp4",
+                pasta_temp
+            )
+            
+            # Obtém propriedades do vídeo original
+            duracao_total = _ffmpeg_obter_duracao(caminho_original)
+            props_original = _ffmpeg_obter_propriedades(caminho_original)
+            width_original = props_original["width"]
+            
+            # Valida os tempos
+            if start_s < 0:
+                start_s = 0.0
+            if end_s > duracao_total:
+                end_s = duracao_total
+            if end_s <= start_s:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"end_s ({end_s}) deve ser maior que start_s ({start_s})"}
+                )
+            
+            # Calcula scale_w automaticamente se não foi fornecido ou se é None
+            # Usa 30% da largura do vídeo original, com limites mínimos e máximos
+            if scale_w is None:
+                scale_w_calculado = int(width_original * 0.3)
+                # Limites: mínimo 360px, máximo 1280px
+                if scale_w_calculado < 360:
+                    scale_w_calculado = 360
+                elif scale_w_calculado > 1280:
+                    scale_w_calculado = 1280
+                scale_w = scale_w_calculado
+            
+            # Aplica o overlay
+            caminho_saida = os.path.join(pasta_temp, "video_teste_overlay.mp4")
+            overlay_clip_on_interval(
+                input_video=caminho_original,
+                insert_clip=caminho_inserir,
+                start_s=start_s,
+                end_s=end_s,
+                out_path=caminho_saida,
+                overlay_x=overlay_x,
+                overlay_y=overlay_y,
+                scale_w=scale_w
+            )
+            
+            # Retorna o vídeo processado
+            with open(caminho_saida, "rb") as f:
+                video_bytes = f.read()
+            
+            return StreamingResponse(
+                BytesIO(video_bytes),
+                media_type="video/mp4",
+                headers={
+                    "Content-Disposition": f"attachment; filename=teste_overlay_{start_s}_{end_s}.mp4"
+                }
+            )
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Erro ao processar overlay: {str(e)}"}
+        )
