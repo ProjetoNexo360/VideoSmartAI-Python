@@ -10,3 +10,4 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     evo_instance = Column(String, nullable=True)
+    heygen_group_id = Column(String, nullable=True)
