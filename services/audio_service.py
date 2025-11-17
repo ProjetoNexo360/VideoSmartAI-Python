@@ -4,7 +4,7 @@ import tempfile
 import httpx
 import subprocess
 import asyncio
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Callable
 from uuid import UUID
 import json
 import unicodedata
@@ -26,9 +26,7 @@ ELEVEN_USERNAME = os.getenv("ELEVEN_USERNAME", "").strip()
 ELEVEN_PASSWORD = os.getenv("ELEVEN_PASSWORD", "").strip()
 
 # ---- Heygen ----
-# ---- Heygen ----
 HEYGEN_BASE_ROOT = os.getenv("HEYGEN_NODE_API", "https://api-heygen-nodejs.onrender.com/api").rstrip("/")
-HEYGEN_API_NS = (os.getenv("HEYGEN_API_NAMESPACE", "") or "").strip()
 HEYGEN_API_NS = (os.getenv("HEYGEN_API_NAMESPACE", "") or "").strip()
 HEYGEN_AUTH_URL = os.getenv("HEYGEN_AUTH_URL", "https://api-heygen-nodejs.onrender.com/api/auth/login").strip()
 HEYGEN_USERNAME = os.getenv("HEYGEN_USERNAME", "").strip()
@@ -242,7 +240,6 @@ async def _eleven_login(force: bool = False) -> str:
     global _eleven_token, _eleven_token_expire_ts
     now = time.time()
     SAFETY_TTL = 50 * 60
-    SAFETY_TTL = 50 * 60
     if not force and _eleven_token and now < _eleven_token_expire_ts:
         return _eleven_token
     if not ELEVEN_USERNAME or not ELEVEN_PASSWORD:
@@ -255,7 +252,6 @@ async def _eleven_login(force: bool = False) -> str:
         )
         resp.raise_for_status()
         data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-    token = data.get("token") or data.get("access_token") or data.get("accessToken") or data.get("jwt")
     token = data.get("token") or data.get("access_token") or data.get("accessToken") or data.get("jwt")
     if not token:
         if isinstance(data, str) and data.strip():
@@ -331,14 +327,6 @@ def _heygen_url(path: str) -> str:
     """
     base = HEYGEN_BASE_ROOT.rstrip("/")  # ex: https://api-heygen-nodejs.onrender.com/api
     p = path.lstrip("/")
-    """
-    Monta a URL da Heygen.
-    Os endpoints públicos do Swagger ficam diretamente em /api/<path> (sem namespace extra).
-    Se HEYGEN_API_NS estiver vazio, usamos direto.
-    Se vier um namespace por engano, ignoramos para rotas conhecidas.
-    """
-    base = HEYGEN_BASE_ROOT.rstrip("/")  # ex: https://api-heygen-nodejs.onrender.com/api
-    p = path.lstrip("/")
     ns = (HEYGEN_API_NS or "").strip()
 
     # Rotas que NÃO usam namespace (conforme Swagger)
@@ -349,7 +337,6 @@ def _heygen_url(path: str) -> str:
 
     if not ns.startswith("/"):
         ns = "/" + ns
-    return f"{base}{ns}/{p}"
     return f"{base}{ns}/{p}"
 
 async def _heygen_login(force: bool = False) -> str:
@@ -368,7 +355,6 @@ async def _heygen_login(force: bool = False) -> str:
         )
         resp.raise_for_status()
         data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-    token = data.get("token") or data.get("access_token") or data.get("accessToken") or data.get("jwt")
     token = data.get("token") or data.get("access_token") or data.get("accessToken") or data.get("jwt")
     if not token:
         if isinstance(data, str) and data.strip():
@@ -403,28 +389,6 @@ async def _heygen_request(method: str, url: str, **kwargs) -> httpx.Response:
         pass
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        try:
-            resp = await client.request(method, url, **kwargs)
-            if resp.status_code == 401:
-                await _heygen_login(force=True)
-                headers = kwargs.get("headers", {}) or {}
-                headers["Authorization"] = f"Bearer {(_heygen_token or '').strip()}"
-                kwargs["headers"] = headers
-
-                _log_heygen_request(
-                    method=method,
-                    url=url,
-                    headers=kwargs.get("headers"),
-                    json_body=kwargs.get("json"),
-                    data=kwargs.get("data"),
-                    files=kwargs.get("files"),
-                )
-
-                resp = await client.request(method, url, **kwargs)
-
-            _log_heygen_response(resp)
-            resp.raise_for_status()
-            return resp
         try:
             resp = await client.request(method, url, **kwargs)
             if resp.status_code == 401:
@@ -574,7 +538,6 @@ def _escape_instance(instance: str) -> str:
 async def evo_create_user_instance(user_name: str, user_id: UUID, evo_base: str | None = None) -> Dict[str, Any]:
     instance_name = make_instance_name(user_name, user_id)
     payload = {"instanceName": instance_name, "integration": EVO_INTEGRATION, "qrcode": False}
-    payload = {"instanceName": instance_name, "integration": EVO_INTEGRATION, "qrcode": False}
     try:
         resp = await _evo_post(EVO_CREATE_PATH, payload, evo_base=evo_base)
         return {"instance": instance_name, "create": resp}
@@ -604,22 +567,9 @@ async def evo_connect(instance: str, evo_base: str | None = None) -> Dict[str, A
     if not instance_name:
         raise ValueError("instance inválida.")
     esc = _escape_instance(instance_name)
-    esc = _escape_instance(instance_name)
     try:
         return await _evo_get(f"{EVO_CONNECT_PATH}/{esc}", evo_base=evo_base)
-        return await _evo_get(f"{EVO_CONNECT_PATH}/{esc}", evo_base=evo_base)
     except httpx.HTTPStatusError as e:
-        if e.response is not None and e.response.status_code == 404:
-            resolved = await _evo_resolve_instance_name(instance_name, evo_base=evo_base)
-            if resolved and resolved != instance_name:
-                return await _evo_get(f"{EVO_CONNECT_PATH}/{_escape_instance(resolved)}", evo_base=evo_base)
-            names = await _evo_list_instances(evo_base=evo_base)
-            raise RuntimeError(json.dumps({
-                "message": "Instância não encontrada ao tentar connect(). Verifique o nome/casing.",
-                "instanceName": instance_name,
-                "availableInstances": names
-            }, ensure_ascii=False)) from e
-        raise
         if e.response is not None and e.response.status_code == 404:
             resolved = await _evo_resolve_instance_name(instance_name, evo_base=evo_base)
             if resolved and resolved != instance_name:
@@ -640,9 +590,7 @@ async def evo_status(instance: str, evo_base: str | None = None):
     if not instance_name:
         raise ValueError("instance inválida.")
     esc = _escape_instance(instance_name)
-    esc = _escape_instance(instance_name)
     try:
-        return await _evo_get(f"{EVO_STATUS_PATH}/{esc}", evo_base=evo_base)
         return await _evo_get(f"{EVO_STATUS_PATH}/{esc}", evo_base=evo_base)
     except httpx.HTTPStatusError as e:
         if e.response is not None and e.response.status_code == 404:
@@ -650,14 +598,7 @@ async def evo_status(instance: str, evo_base: str | None = None):
             if resolved and resolved != instance_name:
                 return await _evo_get(f"{EVO_STATUS_PATH}/{_escape_instance(resolved)}", evo_base=evo_base)
             names = await _evo_list_instances(evo_base=evo_base)
-            resolved = await _evo_resolve_instance_name(instance_name, evo_base=evo_base)
-            if resolved and resolved != instance_name:
-                return await _evo_get(f"{EVO_STATUS_PATH}/{_escape_instance(resolved)}", evo_base=evo_base)
-            names = await _evo_list_instances(evo_base=evo_base)
             raise RuntimeError(json.dumps({
-                "message": "Instância não encontrada no status(). Verifique o nome exato (case-sensitive).",
-                "instanceName": instance_name,
-                "availableInstances": names
                 "message": "Instância não encontrada no status(). Verifique o nome exato (case-sensitive).",
                 "instanceName": instance_name,
                 "availableInstances": names
@@ -668,7 +609,6 @@ async def evo_logout(instance: str, evo_base: str | None = None):
     instance_name = (instance or "").strip()
     if not instance_name:
         raise ValueError("instance inválida.")
-    return await _evo_delete(f"{EVO_DELETE_PATH}/{_escape_instance(instance_name)}", evo_base=evo_base)
     return await _evo_delete(f"{EVO_DELETE_PATH}/{_escape_instance(instance_name)}", evo_base=evo_base)
 
 # =====================
@@ -695,7 +635,6 @@ async def enviar_texto_via_whatsapp(
 ):
     destinos = _mk_candidates(telefone)
     for dst in destinos:
-        payload = {**dst, "text": texto, "options": {"delay": 0, "presence": "composing", "linkPreview": False}}
         payload = {**dst, "text": texto, "options": {"delay": 0, "presence": "composing", "linkPreview": False}}
         for attempt in range(SEND_RETRIES + 1):
             try:
@@ -777,18 +716,20 @@ async def processar_video(
     user_id: UUID,
     contatos: List[Dict[str, str]],
     palavra_chave: str,
-    video_bytes: bytes,
-    nome_video: str,
+    foto_bytes: bytes,
+    nome_foto: str,
+    audio_bytes: bytes,
+    nome_audio: str,
     evo_instance: str | None = None,
     evo_base: str | None = None,
     heygen_group_id: Optional[str] = None,
-    save_group_id_async: Optional[Callable[[UUID, str], Awaitable[None]]] = None,
+    save_group_id_async: Optional[Callable[[UUID, str], Any]] = None,
 ):
     voz_padrao_nome = f"user_{user_id}"  # nome da voice Eleven
     avatar_group_name = f"{voz_padrao_nome}"  # manter mesmo padrão "nome_id"
     with tempfile.TemporaryDirectory() as pasta_temp:
-        caminho_video = salvar_video_em_disco(video_bytes, nome_video, pasta_temp)
-        caminho_audio = extrair_audio_do_video(caminho_video, pasta_temp)
+        caminho_foto = salvar_imagem_em_disco(foto_bytes, nome_foto, pasta_temp)
+        caminho_audio = salvar_audio_em_wav(audio_bytes, nome_audio, pasta_temp)
         transcricao, segmentos = await transcrever_audio_com_timestamps(caminho_audio)
 
         if not transcricao:
@@ -800,11 +741,14 @@ async def processar_video(
         # 2) avatar Heygen (group_id) — cria/usa existente (AGORA: 10 fotos)
         group_id = await heygen_verificar_ou_criar_avatar_do_usuario(
             user_group_name=avatar_group_name,
-            source_video=caminho_video,
+            source_image=caminho_foto,
             segmentos=segmentos,
             palavra_chave=palavra_chave,
             pasta_temp=pasta_temp,
-            num_fotos=10
+            num_fotos=10,
+            existing_group_id=heygen_group_id,
+            user_id=user_id,
+            save_group_id_async=save_group_id_async,
         )
 
         def _norm(s: str) -> str: return (s or "").strip().casefold()
@@ -832,8 +776,8 @@ async def processar_video(
                     transcricao=transcricao,
                     segmentos=segmentos,
                     user_voice_id=user_voice_id,   # usado na Heygen
-                    caminho_video=caminho_video,
                     caminho_audio=caminho_audio,
+                    caminho_foto=caminho_foto,
                     pasta_temp=pasta_temp,
                     user_id=user_id,
                     group_id=group_id
@@ -844,7 +788,6 @@ async def processar_video(
                     evo_instance=evo_instance, evo_base=evo_base
                 )
 
-            except (httpx.HTTPStatusError, ValueError, httpx.HTTPError, RuntimeError, subprocess.CalledProcessError) as e:
             except (httpx.HTTPStatusError, ValueError, httpx.HTTPError, RuntimeError, subprocess.CalledProcessError) as e:
                 print(f"[ERR] Falha com contato '{nome}' ({telefone}): {e}")
 
@@ -862,8 +805,34 @@ def extrair_audio_do_video(caminho_video: str, pasta_temp: str) -> str:
     ], check=True)
     return caminho_audio
 
+def _nome_seguro(nome: Optional[str], padrao: str) -> str:
+    base = (nome or "").strip() or padrao
+    base = os.path.basename(base)
+    return base or padrao
+
+def salvar_imagem_em_disco(foto_bytes: bytes, nome_foto: Optional[str], pasta_temp: str) -> str:
+    nome = _nome_seguro(nome_foto, "foto_usuario.jpg")
+    if "." not in os.path.basename(nome):
+        nome = f"{nome}.jpg"
+    caminho_foto = os.path.join(pasta_temp, nome)
+    with open(caminho_foto, "wb") as f:
+        f.write(foto_bytes)
+    return caminho_foto
+
+def salvar_audio_em_wav(audio_bytes: bytes, nome_audio: Optional[str], pasta_temp: str) -> str:
+    nome = _nome_seguro(nome_audio, "audio_usuario")
+    caminho_original = os.path.join(pasta_temp, nome)
+    with open(caminho_original, "wb") as f:
+        f.write(audio_bytes)
+
+    caminho_audio = os.path.join(pasta_temp, "original_audio.wav")
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", caminho_original, "-ac", "1", "-ar", "16000", caminho_audio
+    ], check=True)
+    return caminho_audio
+
 # =====================
-# STT / Voz (Eleven)
 # STT / Voz (Eleven)
 # =====================
 
@@ -1360,18 +1329,22 @@ async def heygen_delete_group(group_id: str) -> None:
 
 async def heygen_verificar_ou_criar_avatar_do_usuario(
     user_group_name: str,
-    source_video: str,
-    segmentos: List[dict],
-    palavra_chave: str,
-    pasta_temp: str,
-    num_fotos: int = 10
+    source_video: Optional[str] = None,
+    segmentos: Optional[List[dict]] = None,
+    palavra_chave: Optional[str] = None,
+    pasta_temp: Optional[str] = None,
+    num_fotos: int = 10,
+    source_image: Optional[str] = None,
+    existing_group_id: Optional[str] = None,
+    user_id: Optional[UUID] = None,
+    save_group_id_async: Optional[Callable[[UUID, str], Any]] = None,
 ) -> str:
     """
     Retorna group_id do avatar do usuário.
     Se o grupo existir e tiver avatares válidos (status="completed"), retorna o group_id.
     Se não existir ou não tiver avatares válidos, cria um novo grupo e retorna o group_id.
     """
-    group_id = await heygen_find_group_by_name(user_group_name)
+    group_id = existing_group_id or await heygen_find_group_by_name(user_group_name)
 
     # Se grupo existe, verificar se tem avatares válidos
     if group_id:
@@ -1399,14 +1372,23 @@ async def heygen_verificar_ou_criar_avatar_do_usuario(
 
     # Se não existe grupo ou foi deletado, criar novo
     if not group_id:
-        # Extrair frame do meio do vídeo (melhor qualidade e enquadramento)
-        frame_meio = _ffmpeg_extrair_frame_meio(source_video, pasta_temp)
-        
-        # Upload frame do meio + cria grupo
-        first_key = await heygen_upload_photo(frame_meio)
+        if source_image:
+            image_path = source_image
+        elif source_video and pasta_temp:
+            image_path = _ffmpeg_extrair_frame_meio(source_video, pasta_temp)
+        else:
+            raise ValueError("É necessário fornecer source_image ou source_video para criar o avatar.")
+
+        # Upload da imagem + cria grupo
+        first_key = await heygen_upload_photo(image_path)
         group_id = await heygen_create_group(user_group_name, first_key)
 
         print(f"[HEYGEN] Grupo criado: {group_id}")
+        if user_id and save_group_id_async:
+            try:
+                await save_group_id_async(user_id, group_id)
+            except Exception as e:
+                print(f"[HEYGEN] WARN: falha ao persistir group_id para usuário {user_id}: {e}")
         # Aguarda um pouco para a foto ser processada pela Heygen antes de tentar treinar
         print(f"[HEYGEN] Aguardando processamento da foto (5s)...")
         await asyncio.sleep(5.0)
@@ -1606,31 +1588,27 @@ async def gerar_video_para_nome(
     transcricao: str,
     segmentos: List[dict],
     user_voice_id: str,
-    caminho_video: str,
     caminho_audio: str,
+    caminho_foto: str,
     pasta_temp: str,
     user_id: UUID,
     group_id: Optional[str] = None,
     enviar_webhook: bool = True,
-    min_video_duration: Optional[float] = None
 ):
     """
-    Novo fluxo: gera CLIP de vídeo pela Heygen (usando voice_id da Eleven) e faz overlay no trecho.
-    Se algo falhar na Heygen, usa fallback TTS (antigo).
-    
-    Args:
-        min_video_duration: Duração mínima do vídeo em segundos (padrão: HEYGEN_MIN_VIDEO_DURATION)
+    Novo fluxo: gera o vídeo completo diretamente na Heygen a partir de uma foto estática.
+    Se algo falhar, cai no fallback que monta um vídeo simples (foto + TTS).
     """
     try:
-        # 1) intervalo + texto com nome (com duração mínima configurável)
-        inicio, fim, texto_modelo = _extrair_intervalo_por_palavra(segmentos, palavra_chave, min_duration=min_video_duration)
+        # 1) texto com nome (mantém mesma lógica de captura da palavra-chave)
+        _, _, texto_modelo = _extrair_intervalo_por_palavra(segmentos, palavra_chave)
         novo_texto = texto_modelo.format(nome=nome)
 
         # 2) já devemos ter group_id (criado/checado no processar_video), mas mantemos opção de receber None
         if not group_id:
-            # Extrair frame do meio do vídeo (melhor qualidade e enquadramento)
-            frame_meio = _ffmpeg_extrair_frame_meio(caminho_video, pasta_temp)
-            first_key = await heygen_upload_photo(frame_meio)
+            if not os.path.isfile(caminho_foto):
+                raise RuntimeError("Foto base não encontrada para criar avatar na Heygen.")
+            first_key = await heygen_upload_photo(caminho_foto)
             gname = f"user_{user_id}"
             group_id = await heygen_create_group(gname, first_key)
 
@@ -1660,18 +1638,9 @@ async def gerar_video_para_nome(
             with open(insert_clip, "wb") as f:
                 f.write(r.content)
 
-        # 6) overlay no intervalo
+        # 6) Usa diretamente o vídeo retornado pela Heygen
         caminho_saida_video = os.path.join(pasta_temp, f"video_{nome}.mp4")
-        overlay_clip_on_interval(
-            input_video=caminho_video,
-            insert_clip=insert_clip,
-            start_s=inicio,
-            end_s=fim,
-            out_path=caminho_saida_video,
-            overlay_x="(W-w)/2",
-            overlay_y="H-h-40",
-            scale_w=720
-        )
+        os.replace(insert_clip, caminho_saida_video)
 
         if enviar_webhook:
             await enviar_video_para_webhook(caminho_saida_video, nome, user_id)
@@ -1687,8 +1656,8 @@ async def gerar_video_para_nome(
             transcricao=transcricao,
             segmentos=segmentos,
             user_voice_id=user_voice_id,
-            caminho_video=caminho_video,
             caminho_audio=caminho_audio,
+            caminho_foto=caminho_foto,
             pasta_temp=pasta_temp,
             user_id=user_id,
             enviar_webhook=enviar_webhook
@@ -1701,331 +1670,86 @@ async def gerar_video_para_nome_tts(
     transcricao: str,
     segmentos: List[dict],
     user_voice_id: str,
-    caminho_video: str,
     caminho_audio: str,
+    caminho_foto: str,
     pasta_temp: str,
     user_id: UUID,
     enviar_webhook: bool = True
 ):
     if not segmentos:
-        raise ValueError("Lista de segmentos vazia.")
-    alvo = _norm_token(palavra_chave)
+        raise ValueError("Transcrição não retornou palavras com timestamps (lista vazia).")
+
+    alvo_norm = _normalize_token(palavra_chave)
+    palavra_alvo = None
     idx = None
     for i, w in enumerate(segmentos):
-        if str(w.get("type")) != "word":
+        if w.get("type") != "word":
             continue
-        if _norm_token(w.get("text") or "") == alvo:
+        token_norm = _normalize_token(w.get("text", ""))
+        if token_norm == alvo_norm:
+            palavra_alvo = w
             idx = i
             break
-    if idx is None:
-        raise ValueError(f"Palavra-chave '{palavra_chave}' não encontrada nos segmentos.")
-    inicio = max(0.0, float(segmentos[max(0, idx - PALAVRAS_ANTES)]["start"]) - (AJUSTE_MS / 1000))
-    fim = float(segmentos[min(len(segmentos)-1, idx + PALAVRAS_DEPOIS)]["end"]) + (AJUSTE_MS / 1000)
+
+    if not palavra_alvo:
+        raise ValueError(f"Palavra-chave '{palavra_chave}' não encontrada na transcrição.")
+
+    if not user_voice_id:
+        raise ValueError("ID da voz do usuário está vazio.")
+
+    inicio = max(0.0, segmentos[max(0, idx - PALAVRAS_ANTES)]["start"] - (AJUSTE_MS / 1000))
+    fim = segmentos[min(len(segmentos) - 1, idx + PALAVRAS_DEPOIS)]["end"] + (AJUSTE_MS / 1000)
 
     palavras_contexto = [
-        (w.get("text") or "") for w in segmentos
-        if str(w.get("type")) == "word" and inicio <= float(w.get("start",0)) and float(w.get("end",0)) <= fim
+        w["text"] for w in segmentos
+        if w.get("type") == "word" and inicio <= w["start"] and w["end"] <= fim
     ]
     texto_original = " ".join(palavras_contexto)
-    palavra_alvo_literal = segmentos[idx]["text"]
-    return inicio, fim, texto_original.replace(palavra_alvo_literal, ". {nome}.", 1)
 
-def _ffmpeg_pegar_frames(input_video: str, start_s: float, end_s: float, num: int, pasta: str) -> List[str]:
-    dur = max(0.01, end_s - start_s)
-    caminhos: List[str] = []
-    for i in range(num):
-        t = start_s + (dur * (i + 0.5) / num)
-        out = os.path.join(pasta, f"avatar_frame_{i+1:02d}.jpg")
-        subprocess.run([
-            "ffmpeg","-y","-hide_banner","-loglevel","error",
-            "-ss", f"{t:.3f}","-i", input_video,"-frames:v","1","-q:v","2", out
-        ], check=True)
-        caminhos.append(out)
-    return caminhos
+    formato_pausa = ". {nome}."
+    nome_formatado = formato_pausa.format(nome=nome)
+    novo_texto = texto_original.replace(palavra_alvo["text"], nome_formatado)
 
-def _unwrap_data(j: Any) -> Any:
-    try:
-        if isinstance(j, dict) and "data" in j and j["data"] is not None:
-            return j["data"]
-    except Exception:
-        pass
-    return j
+    payload = {"voiceId": user_voice_id, "text": novo_texto}
+    headers = await _eleven_headers(include_json=True)
+    tts_resp = await _eleven_request("POST", _eleven_url("text-to-speech"), json=payload, headers=headers)
+    caminho_trecho_ia = os.path.join(pasta_temp, f"ia_{nome}.mp3")
+    with open(caminho_trecho_ia, "wb") as f:
+        f.write(tts_resp.content)
 
-async def heygen_upload_photo(image_path: str) -> str:
-    url = _heygen_url("photo-avatar/upload")
-    headers = await _heygen_headers()
-    with open(image_path, "rb") as f:
-        files = {"image": (os.path.basename(image_path), f, "image/jpeg")}
-        resp = await _heygen_request("POST", url, headers=headers, files=files)
-    try:
-        j = resp.json()
-    except Exception:
-        j = {}
-    d = _unwrap_data(j)
-    key = (d.get("image_key") if isinstance(d, dict) else None) or j.get("image_key") or j.get("key") or j.get("id") or resp.text.strip()
-    if not key:
-        raise RuntimeError(f"[Heygen] upload photo falhou: {j or resp.text[:200]!r}")
-    print(f"[HEYGEN] upload OK -> image_key={key}")
-    return key
-
-async def heygen_create_group(name: str, image_key: str) -> str:
-    url = _heygen_url("photo-avatar/group")
-    headers = await _heygen_headers(include_json=True)
-    body = {"name": name, "image_key": image_key}
-    resp = await _heygen_request("POST", url, headers=headers, json=body)
-    j = resp.json()
-    d = _unwrap_data(j)
-    gid = (d.get("group_id") if isinstance(d, dict) else None) or (d.get("id") if isinstance(d, dict) else None) or j.get("group_id") or j.get("id")
-    if not gid:
-        raise RuntimeError(f"[Heygen] create group sem id: {j!r}")
-    print(f"[HEYGEN][GROUP] criado -> id={gid}, name={name}")
-    return gid
-
-async def heygen_group_add(group_id: str, image_keys: List[str]) -> None:
-    url = _heygen_url(f"photo-avatar/group/{group_id}/add")
-    headers = await _heygen_headers(include_json=True)
-    body = {"image_keys": image_keys}
-    try:
-        await _heygen_request("POST", url, headers=headers, json=body)
-        print(f"[HEYGEN] group add OK -> group_id={group_id}, added={len(image_keys)}")
-    except Exception as e:
-        _log_heygen_error(e, extra={"group_id": group_id, "body": body})
-        print(f"[HEYGEN] group add FALHOU -> seguindo fluxo")
-
-# --- Garante/obtém somente o GROUP_ID (sem talking_photo) ---
-async def heygen_garantir_grupo_do_usuario(
-    user_group_name: str,
-    source_video: str,
-    segmentos: List[dict],
-    palavra_chave: str,
-    pasta_temp: str,
-    num_fotos: int = 10,
-    user_id: Optional[UUID] = None,
-    existing_group_id: Optional[str] = None,
-    save_group_id_async: Optional[Callable[[UUID, str], Awaitable[None]]] = None,
-) -> str:
-    if existing_group_id:
-        return existing_group_id
-
-    inicio, fim, _ = _extrair_intervalo_por_palavra(segmentos, palavra_chave)
-    frames = _ffmpeg_pegar_frames(source_video, max(0.0, inicio - 0.8), fim + 0.8, num_fotos, pasta_temp)
-    frames = frames[:3]
-
-    if not frames:
-        raise RuntimeError("Não foi possível extrair frames para o avatar.")
-
-    first_key = await heygen_upload_photo(frames[0])
-    group_id = await heygen_create_group(user_group_name, first_key)
-
-    if user_id is not None and save_group_id_async is not None:
-        try:
-            await save_group_id_async(user_id, group_id)
-        except Exception as e:
-            print(f"[HEYGEN] WARN persist group_id: {e}")
-
-    if len(frames) > 1:
-        extras = []
-        for p in frames[1:]:
-            try:
-                extras.append(await heygen_upload_photo(p))
-            except Exception as e:
-                print(f"[Heygen] upload extra falhou: {e}")
-        if extras:
-            await heygen_group_add(group_id, extras)
-
-    return group_id
-
-# --- COMPATIBILIDADE: mantém o nome que o main.py importa ---
-async def heygen_verificar_ou_criar_avatar_do_usuario(
-    user_group_name: str,
-    source_video: str,
-    segmentos: List[dict],
-    palavra_chave: str,
-    pasta_temp: str,
-    num_fotos: int = 10,
-    user_id: Optional[UUID] = None,
-    existing_group_id: Optional[str] = None,
-    save_group_id_async: Optional[Callable[[UUID, str], Awaitable[None]]] = None,
-) -> str:
-    """
-    **Compat:** mantém o nome antigo, mas retorna **group_id** (não talking_photo_id).
-    Não usa custom-avatar; apenas garante/retorna o ID do grupo.
-    """
-    return await heygen_garantir_grupo_do_usuario(
-        user_group_name=user_group_name,
-        source_video=source_video,
-        segmentos=segmentos,
-        palavra_chave=palavra_chave,
-        pasta_temp=pasta_temp,
-        num_fotos=num_fotos,
-        user_id=user_id,
-        existing_group_id=existing_group_id,
-        save_group_id_async=save_group_id_async,
-    )
-
-# =====================
-# Render de vídeo Heygen (/videos com group_id em talking_photo_id)
-# =====================
-
-async def heygen_criar_video(talking_photo_id: str, voice_id: str, script: str, test: bool = True) -> str:
-    """
-    Cria job de vídeo e retorna jobId.
-    Aqui, 'talking_photo_id' recebe o **group_id**.
-    """
-    url = _heygen_url("videos")
-    headers = await _heygen_headers(include_json=True)
-    payload = {"talking_photo_id": talking_photo_id, "voice_id": voice_id, "script": script, "test": bool(test)}
-    resp = await _heygen_request("POST", url, headers=headers, json=payload)
-    j = resp.json() if resp.headers.get("content-type","").startswith("application/json") else {}
-    d = _unwrap_data(j)
-    job_id = (d.get("jobId") if isinstance(d, dict) else None) or j.get("jobId") or j.get("id")
-    if not job_id:
-        raise RuntimeError(f"[Heygen] POST /videos sem jobId: {j!r}")
-    print(f"[HEYGEN] video job OK -> jobId={job_id}")
-    return job_id
-
-async def heygen_aguardar_video(job_id: str, sleep: float = 2.0) -> str:
-    url = _heygen_url(f"videos/{job_id}")
-    headers = await _heygen_headers()
-    while True:
-        resp = await _heygen_request("GET", url, headers=headers)
-        j = resp.json() if resp.headers.get("content-type","").startswith("application/json") else {}
-        d = _unwrap_data(j)
-        st = ((d.get("status") if isinstance(d, dict) else None) or j.get("status") or "").upper()
-        print(f"[HEYGEN] poll job={job_id} status={st}")
-        video_url = (d.get("video_url") if isinstance(d, dict) else None) or j.get("video_url")
-        if st == "COMPLETED" and video_url:
-            print(f"[HEYGEN] video pronto -> {video_url}")
-            return video_url
-        if st in ("FAILED","ERROR"):
-            raise RuntimeError(f"[Heygen] job {job_id} falhou: {j!r}")
-        time.sleep(sleep)
-
-def overlay_clip_on_interval(
-    input_video: str,
-    insert_clip: str,
-    start_s: float,
-    end_s: float,
-    out_path: str,
-    overlay_x: str = "(W-w)/2",
-    overlay_y: str = "H-h",
-    scale_w: Optional[int] = 720,
-    fade_ms: int = 120,
-) -> str:
-    dur = max(0.01, end_s - start_s)
-    with tempfile.TemporaryDirectory() as td:
-        before = os.path.join(td, "before.mp4")
-        middle = os.path.join(td, "middle.mp4")
-        after = os.path.join(td, "after.mp4")
-        scaled = os.path.join(td, "insert_scaled.mp4")
-        middle_overlay = os.path.join(td, "middle_overlay.mp4")
-        subprocess.run([
-            "ffmpeg","-y","-hide_banner","-loglevel","error",
-            "-ss","0","-to", f"{start_s:.3f}","-i", input_video,"-c","copy", before
-        ], check=True)
-        subprocess.run([
-            "ffmpeg","-y","-hide_banner","-loglevel","error",
-            "-ss", f"{start_s:.3f}","-to", f"{end_s:.3f}","-i", input_video,
-            "-c:v","libx264","-an", middle
-        ], check=True)
-        subprocess.run([
-            "ffmpeg","-y","-hide_banner","-loglevel","error",
-            "-ss", f"{end_s:.3f}","-i", input_video,"-c","copy", after
-        ], check=True)
-        vf = []
-        if scale_w:
-            vf.append(f"scale={scale_w}:-2")
-        if fade_ms > 0:
-            vf.append(f"fade=t=in:st=0:d={fade_ms/1000:.3f},fade=t=out:st={max(0.0,dur - fade_ms/1000):.3f}:d={fade_ms/1000:.3f}")
-        vf_arg = ",".join(vf) if vf else "null"
-        subprocess.run([
-            "ffmpeg","-y","-hide_banner","-loglevel","error",
-            "-i", insert_clip,"-vf", vf_arg,"-c:v","libx264","-c:a","aac","-shortest", scaled
-        ], check=True)
-        filter_complex = f"[0:v][1:v]overlay=x={overlay_x}:y={overlay_y}:eof_action=pass[outv]"
-        subprocess.run([
-            "ffmpeg","-y","-hide_banner","-loglevel","error",
-            "-i", middle,"-i", scaled,
-            "-filter_complex", filter_complex,
-            "-map","[outv]","-map","1:a:0",
-            "-c:v","libx264","-c:a","aac","-shortest", middle_overlay
-        ], check=True)
-        concat_list = os.path.join(td, "list.txt")
-        with open(concat_list, "w", encoding="utf-8") as f:
-            f.write(f"file '{before}'\n")
-            f.write(f"file '{middle_overlay}'\n")
-            f.write(f"file '{after}'\n")
-        subprocess.run([
-            "ffmpeg","-y","-hide_banner","-loglevel","error",
-            "-f","concat","-safe","0","-i", concat_list,"-c","copy", out_path
-        ], check=True)
-    return out_path
-
-# =====================
-# Geração final — /videos com group_id
-# =====================
-
-async def gerar_video_para_nome(
-    nome: str,
-    palavra_chave: str,
-    transcricao: str,
-    segmentos: List[dict],
-    user_voice_id: str,
-    caminho_video: str,
-    caminho_audio: str,
-    pasta_temp: str,
-    user_id: UUID,
-    group_id: Optional[str] = None,
-    talking_photo_id: Optional[str] = None,  # <- compat: main.py pode enviar com este nome
-    enviar_webhook: bool = True
-):
-    """
-    Gera o clipe na Heygen usando /videos (sem custom-avatar).
-    Observação: por compatibilidade, aceitamos tanto `group_id` quanto `talking_photo_id`
-    (onde `talking_photo_id` também conterá o ID do grupo).
-    """
-    # 1) intervalo + texto com nome
-    inicio, fim, texto_modelo = _extrair_intervalo_por_palavra(segmentos, palavra_chave)
-    novo_texto = texto_modelo.format(nome=nome)
-
-    # 2) compat: usamos o que vier
-    actual_id = group_id or talking_photo_id
-    if not actual_id:
-        raise RuntimeError("group_id/talking_photo_id ausente; não foi possível determinar o grupo do avatar.")
-
-    # 3) cria job do vídeo (campo talking_photo_id recebe o ID do GRUPO, conforme requisito)
-    job_id = await heygen_criar_video(actual_id, user_voice_id, novo_texto, test=True)
-    video_url = await heygen_aguardar_video(job_id)
-
-    # 4) baixa o clip
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.get(video_url)
-        r.raise_for_status()
-        insert_clip = os.path.join(pasta_temp, f"heygen_{nome}.mp4")
-        with open(insert_clip, "wb") as f:
-            f.write(r.content)
-
-    # 5) overlay no intervalo
+    caminho_audio_antes = os.path.join(pasta_temp, "antes.wav")
+    caminho_audio_depois = os.path.join(pasta_temp, "depois.wav")
+    caminho_audio_final = os.path.join(pasta_temp, f"audio_final_{nome}.wav")
     caminho_saida_video = os.path.join(pasta_temp, f"video_{nome}.mp4")
-    overlay_clip_on_interval(
-        input_video=caminho_video,
-        insert_clip=insert_clip,
-        start_s=inicio,
-        end_s=fim,
-        out_path=caminho_saida_video,
-        overlay_x="(W-w)/2",
-        overlay_y="H-h-40",
-        scale_w=720
-    )
+
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", caminho_audio, "-ss", "0", "-to", f"{inicio:.3f}", caminho_audio_antes
+    ], check=True)
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", caminho_audio, "-ss", f"{fim:.3f}", caminho_audio_depois
+    ], check=True)
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", caminho_audio_antes, "-i", caminho_trecho_ia, "-i", caminho_audio_depois,
+        "-filter_complex", "[0:0][1:0][2:0]concat=n=3:v=0:a=1[out]",
+        "-map", "[out]", caminho_audio_final
+    ], check=True)
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-loop", "1", "-i", caminho_foto, "-i", caminho_audio_final,
+        "-c:v", "libx264", "-tune", "stillimage",
+        "-c:a", "aac", "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-shortest",
+        caminho_saida_video
+    ], check=True)
 
     if enviar_webhook:
         await enviar_video_para_webhook(caminho_saida_video, nome, user_id)
 
     return caminho_saida_video
-
-# =====================
-# Webhook
-# =====================
 
 # =====================
 # Webhook

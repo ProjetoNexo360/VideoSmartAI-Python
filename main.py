@@ -15,7 +15,8 @@ from models import User
 from auth_utils import get_db, hash_password, verify_password, create_access_token, get_current_user
 
 from services.audio_service import (
-    processar_video, salvar_video_em_disco, extrair_audio_do_video,
+    processar_video, salvar_video_em_disco,
+    salvar_imagem_em_disco, salvar_audio_em_wav,
     transcrever_audio_com_timestamps, verificar_ou_criar_voz, gerar_video_para_nome,
     enviar_video_para_webhook,
     enviar_texto_via_whatsapp, enviar_video_via_whatsapp,
@@ -186,23 +187,28 @@ async def gerar_videos(
     background_tasks: BackgroundTasks = None,
     contatos: str = Form(..., description='JSON: [{"nome":"...","telefone":"..."}, ...]'),
     palavra_chave: str = Form(...),
-    video: UploadFile = File(...),
+    foto: UploadFile = File(...),
+    audio: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
     if not current_user.evo_instance:
         raise HTTPException(status_code=400, detail="Vincule sua instância na Evolution API antes (POST /evo/start).")
 
     contatos_lista = parse_contatos(contatos)
-    video_bytes = await video.read()
-    nome_video = video.filename
+    foto_bytes = await foto.read()
+    nome_foto = foto.filename or "foto_usuario.jpg"
+    audio_bytes = await audio.read()
+    nome_audio = audio.filename or "audio_usuario.wav"
 
     background_tasks.add_task(
         processar_video,
         user_id=user_id,
         contatos=contatos_lista,
         palavra_chave=palavra_chave,
-        video_bytes=video_bytes,
-        nome_video=nome_video,
+        foto_bytes=foto_bytes,
+        nome_foto=nome_foto,
+        audio_bytes=audio_bytes,
+        nome_audio=nome_audio,
         evo_instance=current_user.evo_instance,
         evo_base=None,
         heygen_group_id=current_user.heygen_group_id,        # <- reusa o group_id do user se existir
@@ -224,8 +230,8 @@ async def gerar_preview(
     user_id: UUID,
     contatos: str = Form(..., description='JSON: [{"nome":"...","telefone":"..."}, ...]'),
     palavra_chave: str = Form(...),
-    video: UploadFile = File(...),
-    min_video_duration: Optional[float] = Form(None, description="Duração mínima do vídeo em segundos (padrão: 5.0)"),
+    foto: UploadFile = File(...),
+    audio: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
     if not current_user.evo_instance:
@@ -233,12 +239,14 @@ async def gerar_preview(
 
     contatos_lista = parse_contatos(contatos)
     primeiro = contatos_lista[0]
-    video_bytes = await video.read()
-    nome_video = video.filename
+    foto_bytes = await foto.read()
+    nome_foto = foto.filename or "foto_usuario.jpg"
+    audio_bytes = await audio.read()
+    nome_audio = audio.filename or "audio_usuario.wav"
 
     with tempfile.TemporaryDirectory() as pasta_temp:
-        caminho_video = salvar_video_em_disco(video_bytes, nome_video, pasta_temp)
-        caminho_audio = extrair_audio_do_video(caminho_video, pasta_temp)
+        caminho_foto = salvar_imagem_em_disco(foto_bytes, nome_foto, pasta_temp)
+        caminho_audio = salvar_audio_em_wav(audio_bytes, nome_audio, pasta_temp)
         transcricao, segmentos = await transcrever_audio_com_timestamps(caminho_audio)
         user_voice_id = await verificar_ou_criar_voz(f"user_{user_id}", caminho_audio, pasta_temp)
 
@@ -246,11 +254,14 @@ async def gerar_preview(
         avatar_group_name = f"user_{user_id}"
         group_id = await heygen_verificar_ou_criar_avatar_do_usuario(
             user_group_name=avatar_group_name,
-            source_video=caminho_video,
+            source_image=caminho_foto,
             segmentos=segmentos,
             palavra_chave=palavra_chave,
             pasta_temp=pasta_temp,
-            num_fotos=10
+            num_fotos=10,
+            existing_group_id=current_user.heygen_group_id,
+            user_id=user_id,
+            save_group_id_async=salvar_group_id_no_banco,
         )
         
         # Inicia treino assíncrono (waitForCompleted=false)
@@ -263,13 +274,12 @@ async def gerar_preview(
             transcricao=transcricao,
             segmentos=segmentos,
             user_voice_id=user_voice_id,
-            caminho_video=caminho_video,
             caminho_audio=caminho_audio,
+            caminho_foto=caminho_foto,
             pasta_temp=pasta_temp,
             user_id=user_id,
             group_id=group_id,
             enviar_webhook=False,
-            min_video_duration=min_video_duration
         )
 
         with open(caminho_saida_preview, "rb") as f:
@@ -282,11 +292,12 @@ async def gerar_preview(
             "transcricao": transcricao,
             "segmentos": segmentos,
             "voice_id": user_voice_id,
-            "video_bytes": video_bytes.decode("latin1"),
-            "nome_video": nome_video,
+            "foto_bytes": foto_bytes.decode("latin1"),
+            "nome_foto": nome_foto,
+            "audio_bytes": audio_bytes.decode("latin1"),
+            "nome_audio": nome_audio,
             "group_id": group_id,
             "train_response": train_response,  # Resposta do train para verificar depois
-            "min_video_duration": min_video_duration,  # Duração mínima configurada
             # guardo a instância do usuário no momento do preview
             "evo_instance": current_user.evo_instance
         })
@@ -341,25 +352,28 @@ async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks, curr
             print(f"[HEYGEN] WARNING: group_id não encontrado nos dados do preview")
         
         with tempfile.TemporaryDirectory() as pasta_temp:
-            caminho_video = salvar_video_em_disco(
-                dados["video_bytes"].encode("latin1"),
-                dados["nome_video"],
+            caminho_foto = salvar_imagem_em_disco(
+                dados["foto_bytes"].encode("latin1"),
+                dados["nome_foto"],
                 pasta_temp
             )
-            caminho_audio = extrair_audio_do_video(caminho_video, pasta_temp)
+            caminho_audio = salvar_audio_em_wav(
+                dados["audio_bytes"].encode("latin1"),
+                dados["nome_audio"],
+                pasta_temp
+            )
 
-            # NOVO: garantir talking_photo_id (reusar o salvo; se faltar, criar/reusar agora)
-            talking_photo_id = dados.get("talking_photo_id")
-            if not talking_photo_id:
-                talking_photo_id = await heygen_verificar_ou_criar_avatar_do_usuario(
+            # Garante group_id válido
+            if not group_id:
+                group_id = await heygen_verificar_ou_criar_avatar_do_usuario(
                     user_group_name=f"user_{user_id}",
-                    source_video=caminho_video,
+                    source_image=caminho_foto,
                     segmentos=dados["segmentos"],
                     palavra_chave=dados["palavra_chave"],
                     pasta_temp=pasta_temp,
                     num_fotos=10,
                     user_id=user_id,
-                    existing_group_id=dados.get("heygen_group_id") or current_user.heygen_group_id,
+                    existing_group_id=current_user.heygen_group_id,
                     save_group_id_async=salvar_group_id_no_banco,
                 )
 
@@ -381,13 +395,12 @@ async def confirmar_envio(user_id: UUID, background_tasks: BackgroundTasks, curr
                         transcricao=dados["transcricao"],
                         segmentos=dados["segmentos"],
                         user_voice_id=dados["voice_id"],
-                        caminho_video=caminho_video,
                         caminho_audio=caminho_audio,
+                        caminho_foto=caminho_foto,
                         pasta_temp=pasta_temp,
                         user_id=user_id,
                         group_id=group_id,  # Passa group_id do preview
                         enviar_webhook=False,
-                        min_video_duration=dados.get("min_video_duration")  # Usa o mesmo valor do preview, se disponível
                     )
                     videos[k] = caminho
                 except Exception as e:
@@ -509,3 +522,4 @@ async def teste_overlay(
             status_code=500,
             content={"error": f"Erro ao processar overlay: {str(e)}"}
         )
+ 
