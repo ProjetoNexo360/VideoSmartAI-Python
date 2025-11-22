@@ -836,125 +836,8 @@ def salvar_audio_em_wav(audio_bytes: bytes, nome_audio: Optional[str], pasta_tem
 # STT / Voz (Eleven)
 # =====================
 
-def _aplicar_reducao_ruido(caminho_audio: str) -> str:
-    """
-    Aplica um tratamento leve de ruído no áudio usando ffmpeg.
-    - Mantém o áudio mono 16k.
-    - Usa filtros simples (highpass/lowpass) que costumam funcionar bem para voz.
-    - Em caso de erro, retorna o caminho original sem quebrar o fluxo.
-    """
-    if not os.path.isfile(caminho_audio):
-        return caminho_audio
-
-    pasta = os.path.dirname(caminho_audio) or tempfile.gettempdir()
-    caminho_limpo = os.path.join(pasta, "audio_clean.wav")
-
-    try:
-        # Filtro bem conservador: remove ruídos muito graves e muito agudos
-        # sem distorcer demais a voz.
-        subprocess.run([
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", caminho_audio,
-            "-ac", "1", "-ar", "16000",
-            "-af", "highpass=f=100, lowpass=f=8000",
-            caminho_limpo
-        ], check=True)
-        return caminho_limpo
-    except Exception as e:
-        # Se qualquer coisa falhar, usa o áudio original
-        print(f"[STT] WARN: falha ao aplicar redução de ruído, usando áudio original: {e}")
-        return caminho_audio
-
-
-def _melhorar_transcricao(transcricao: str, segmentos: List[Dict[str, Any]]) -> str:
-    """
-    Faz alguns ajustes simples de pontuação na transcrição:
-      - Usa pausas longas dos segmentos para sugerir fim de frase.
-      - Garante que as frases começam com letra maiúscula.
-      - Garante pontuação final (., ?, !).
-    Tudo é feito de forma conservadora para não "quebrar" o texto original.
-    """
-    if not transcricao:
-        # Se não veio texto da API, tenta reconstruir a partir dos segmentos
-        palavras = [str(w.get("text") or "") for w in segmentos if str(w.get("type")) == "word"]
-        transcricao = " ".join(palavras)
-
-    transcricao = (transcricao or "").strip()
-    if not transcricao:
-        return ""
-
-    # Se não temos segmentos suficientes, apenas garante pontuação final
-    if not segmentos or len(segmentos) < 3:
-        if transcricao[-1] not in ".!?":
-            transcricao += "."
-        return transcricao
-
-    # Constrói frases usando gaps de tempo entre as palavras
-    palavras_seg = [
-        (str(w.get("text") or ""), float(w.get("start", 0.0)), float(w.get("end", 0.0)))
-        for w in segmentos
-        if str(w.get("type")) == "word" and w.get("text")
-    ]
-    if not palavras_seg:
-        if transcricao[-1] not in ".!?":
-            transcricao += "."
-        return transcricao
-
-    frases: List[str] = []
-    atual: List[str] = []
-    ultimo_end = palavras_seg[0][2]
-
-    # Limite de pausa para "quebrar" frase (em segundos)
-    LIMIAR_PAUSA = 1.0
-
-    for palavra, start, end in palavras_seg:
-        gap = start - ultimo_end
-        if gap > LIMIAR_PAUSA and atual:
-            frases.append(" ".join(atual).strip())
-            atual = []
-        atual.append(palavra)
-        ultimo_end = end
-
-    if atual:
-        frases.append(" ".join(atual).strip())
-
-    # Se, por algum motivo, conseguimos apenas 1 frase e o texto original já tinha
-    # alguma pontuação, preferimos manter o original para não piorar.
-    if len(frases) <= 1 and any(c in transcricao for c in ".?!"):
-        texto_final = transcricao
-    else:
-        # Normaliza cada frase: capitaliza primeira letra e garante ponto final
-        frases_norm: List[str] = []
-        for f in frases:
-            f = f.strip()
-            if not f:
-                continue
-            # Capitaliza somente primeira letra visível
-            primeira = f[0].upper()
-            resto = f[1:]
-            f = primeira + resto
-            if f[-1] not in ".!?":
-                f += "."
-            frases_norm.append(f)
-        texto_final = " ".join(frases_norm).strip()
-
-    if texto_final and texto_final[-1] not in ".!?":
-        texto_final += "."
-
-    return texto_final
-
-
 async def transcrever_audio_com_timestamps(caminho_audio: str) -> Tuple[str, List[Dict[str, Any]]]:
-    """
-    Transcreve o áudio usando a API da ElevenLabs, aplicando:
-      - Tratamento leve de ruídos antes do envio.
-      - Melhoria de pontuação baseada nas pausas detectadas.
-    Em qualquer erro de pré-processamento, volta para o comportamento original.
-    """
-    # 1) Aplica redução de ruído em um arquivo auxiliar (se falhar, usa o original)
-    caminho_para_stt = _aplicar_reducao_ruido(caminho_audio)
-
-    with open(caminho_para_stt, "rb") as audio_file:
+    with open(caminho_audio, "rb") as audio_file:
         files = {"file": ("original.wav", audio_file, "audio/wav")}
         headers = await _eleven_headers()
         response = await _eleven_request(
@@ -994,9 +877,6 @@ async def transcrever_audio_com_timestamps(caminho_audio: str) -> Tuple[str, Lis
         if not text or start is None or end is None:
             continue
         segmentos.append({"type": "word", "text": str(text), "start": float(start), "end": float(end)})
-
-    # 2) Ajusta pontuação de forma conservadora, usando os segmentos
-    transcricao = _melhorar_transcricao(transcricao, segmentos)
 
     return transcricao, segmentos
 
@@ -1184,7 +1064,7 @@ def _ffmpeg_obter_propriedades(input_video: str) -> Dict[str, Any]:
         width = stream.get("width", 1920)
         height = stream.get("height", 1080)
         r_frame_rate = stream.get("r_frame_rate", "30/1")
-        # Calcu
+        # Calcula fps
         if "/" in r_frame_rate:
             num, den = map(int, r_frame_rate.split("/"))
             fps = num / den if den > 0 else 30.0
@@ -1397,27 +1277,18 @@ async def heygen_group_avatars(group_id: str) -> List[dict]:
 
 async def heygen_verificar_status_treino(group_id: str) -> bool:
     """
-    Verifica se o treino está pronto usando a rota correta:
-    GET /photo-avatar/train/status/{groupId}
-    Retorna True se status == "ready"
+    Verifica se o treino do grupo está completo consultando os avatares.
+    Retorna True se algum avatar tem status "completed", False caso contrário.
     """
-    url = _heygen_url(f"photo-avatar/train/status/{group_id}")
-    headers = await _heygen_headers()
-
     try:
-        resp = await _heygen_request("GET", url, headers=headers)
-        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-
-        status = (
-            data.get("status")
-            or data.get("data", {}).get("status")
-            or data.get("result", {}).get("status")
-        )
-
-        print(f"[HEYGEN] Status do treino para group_id={group_id}: {status}")
-
-        return str(status).lower() == "ready"
-
+        avatars = await heygen_group_avatars(group_id)
+        for av in avatars or []:
+            status = (av.get("status") or "").lower()
+            if status == "completed":
+                print(f"[HEYGEN] Treino completo para group_id={group_id}")
+                return True
+        print(f"[HEYGEN] Treino ainda não completo para group_id={group_id}")
+        return False
     except Exception as e:
         _log_heygen_error(e, extra={"group_id": group_id})
         return False
@@ -1726,31 +1597,16 @@ async def gerar_video_para_nome(
 ):
     """
     Novo fluxo: gera o vídeo completo diretamente na Heygen a partir de uma foto estática.
-    Melhorias:
-      - Usa a transcrição pós-processada (pontuação melhorada).
-      - Substituição da palavra-chave usando regex com proteção contra nomes compostos
-        e evitando substituir pedaços de outras palavras.
     Se algo falhar, cai no fallback que monta um vídeo simples (foto + TTS).
     """
     try:
-        # 1) Texto base (já deve ter vindo do STT com pontuação melhorada)
-        texto_completo = transcricao or ""
+        # 1) texto com nome (mantém mesma lógica de captura da palavra-chave)
+        texto_completo = transcricao
 
-        if palavra_chave:
-            # Protege contra substituir dentro de outras palavras (ex: "ana" em "analisar")
-            # e funciona mesmo se a palavra-chave tiver espaços (frase completa).
-            pattern = r"(?i)(?<!\\w)" + re.escape(palavra_chave.strip()) + r"(?!\\w)"
+        padrao = re.compile(re.escape(palavra_chave), re.IGNORECASE)
+        novo_texto = padrao.sub(nome, texto_completo)
 
-            def _replace_keyword(match: re.Match) -> str:
-                # Nome pode ser composto, com espaços, acentos etc. Aqui apenas retornamos
-                # o nome literal, sem interpretar backreferences.
-                return nome
-
-            novo_texto = re.sub(pattern, _replace_keyword, texto_completo)
-        else:
-            novo_texto = texto_completo
-
-        # 2) Já devemos ter group_id (criado/checado no processar_video), mas mantemos opção de receber None
+        # 2) já devemos ter group_id (criado/checado no processar_video), mas mantemos opção de receber None
         if not group_id:
             if not os.path.isfile(caminho_foto):
                 raise RuntimeError("Foto base não encontrada para criar avatar na Heygen.")
@@ -1822,52 +1678,22 @@ async def gerar_video_para_nome_tts(
     user_id: UUID,
     enviar_webhook: bool = True
 ):
-    """
-    Fallback de geração de vídeo usando TTS.
-    Melhorias:
-      - Suporte a palavra-chave com mais de uma palavra.
-      - Proteção para nomes compostos na inserção (usa regex com limites de palavra).
-    """
     if not segmentos:
         raise ValueError("Transcrição não retornou palavras com timestamps (lista vazia).")
 
-    # Lista de índices apenas das palavras
-    indices_palavras: List[int] = [i for i, w in enumerate(segmentos) if w.get("type") == "word"]
-    if not indices_palavras:
-        raise ValueError("Transcrição não contém palavras utilizáveis para localizar a palavra-chave.")
-
-    alvo_norm = _normalize_token(palavra_chave or "")
-    if not alvo_norm:
-        raise ValueError("Palavra-chave vazia.")
-
-    alvo_tokens = [tok for tok in alvo_norm.split() if tok]
-
+    alvo_norm = _normalize_token(palavra_chave)
     palavra_alvo = None
-    idx: Optional[int] = None
+    idx = None
+    for i, w in enumerate(segmentos):
+        if w.get("type") != "word":
+            continue
+        token_norm = _normalize_token(w.get("text", ""))
+        if token_norm == alvo_norm:
+            palavra_alvo = w
+            idx = i
+            break
 
-    if len(alvo_tokens) == 1:
-        # Caso simples: apenas uma palavra
-        token = alvo_tokens[0]
-        for i in indices_palavras:
-            w = segmentos[i]
-            token_norm = _normalize_token(w.get("text", ""))
-            if token_norm == token:
-                palavra_alvo = w
-                idx = i
-                break
-    else:
-        # Palavra-chave composta: procura sequência de tokens consecutivos
-        for offset in range(0, len(indices_palavras) - len(alvo_tokens) + 1):
-            window_indices = indices_palavras[offset:offset + len(alvo_tokens)]
-            window_words = [segmentos[i] for i in window_indices]
-            if all(_normalize_token(w.get("text", "")) == alvo_tokens[j] for j, w in enumerate(window_words)):
-                # Usa o índice da palavra "central" para o contexto temporal
-                meio = len(window_indices) // 2
-                idx = window_indices[meio]
-                palavra_alvo = segmentos[idx]
-                break
-
-    if palavra_alvo is None or idx is None:
+    if not palavra_alvo:
         raise ValueError(f"Palavra-chave '{palavra_chave}' não encontrada na transcrição.")
 
     if not user_voice_id:
@@ -1884,18 +1710,7 @@ async def gerar_video_para_nome_tts(
 
     formato_pausa = ". {nome}."
     nome_formatado = formato_pausa.format(nome=nome)
-
-    if palavra_chave:
-        # Substitui apenas a primeira ocorrência da palavra-chave (frase ou palavra),
-        # respeitando limites de palavra para não pegar pedaços de outras palavras.
-        pattern = r"(?i)(?<!\\w)" + re.escape(palavra_chave.strip()) + r"(?!\\w)"
-
-        def _repl_keyword(match: re.Match) -> str:
-            return nome_formatado
-
-        novo_texto = re.sub(pattern, _repl_keyword, texto_original, count=1)
-    else:
-        novo_texto = texto_original
+    novo_texto = texto_original.replace(palavra_alvo["text"], nome_formatado)
 
     payload = {"voiceId": user_voice_id, "text": novo_texto}
     headers = await _eleven_headers(include_json=True)
