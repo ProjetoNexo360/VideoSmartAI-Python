@@ -1,0 +1,168 @@
+# render.yaml - Configuração para deploy no Render.com
+# Documentação: https://render.com/docs/blueprint-spec
+#
+# IMPORTANTE: Após criar os serviços, configure manualmente:
+# 1. As variáveis de ambiente que estão marcadas como sync: false
+# 2. As URLs de conexão entre serviços (use Internal URLs do Render)
+# 3. O Redis (crie um Key Value Store manualmente)
+
+services:
+  # ============================================
+  # VideoSmartAI API (Aplicação Principal)
+  # ============================================
+  - type: web
+    name: videosmartai-api
+    runtime: docker
+    plan: standard  # Recomendado para processamento de vídeo/áudio
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      # Database - Configure manualmente com a Internal Database URL
+      - key: DATABASE_URL
+        sync: false
+      
+      # Redis - Configure manualmente com a Connection String do Key Value Store
+      - key: REDIS_URL
+        sync: false
+      
+      # ElevenLabs API
+      - key: ELEVEN_NODE_API
+        sync: false
+      - key: ELEVEN_API_NAMESPACE
+        sync: false
+        value: /elevenlabs
+      - key: ELEVEN_AUTH_URL
+        sync: false
+      - key: ELEVEN_USERNAME
+        sync: false
+      - key: ELEVEN_PASSWORD
+        sync: false
+      
+      # Heygen API
+      - key: HEYGEN_NODE_API
+        sync: false
+      - key: HEYGEN_API_NAMESPACE
+        sync: false
+      - key: HEYGEN_AUTH_URL
+        sync: false
+      - key: HEYGEN_USERNAME
+        sync: false
+      - key: HEYGEN_PASSWORD
+        sync: false
+      - key: HEYGEN_DEBUG
+        value: "1"
+      
+      # Evolution API - Configure com a URL interna do serviço evolution-api
+      # Use: http://evolution-api:8080 (se na mesma rede privada)
+      # Ou: https://evolution-api.onrender.com (URL externa)
+      - key: EVO_BASE
+        sync: false
+      - key: EVO_APIKEY
+        sync: false
+      - key: EVO_INSTANCE
+        value: default
+      - key: EVO_INTEGRATION
+        value: WHATSAPP-BAILEYS
+      
+      # Automação API
+      - key: AUTOMATION_API_BASE
+        sync: false
+      
+      # Webhook
+      - key: WEBHOOK_URL
+        sync: false
+      
+      # Configurações gerais
+      - key: HTTP_TIMEOUT
+        value: "120.0"
+      - key: PALAVRAS_ANTES
+        value: "2"
+      - key: PALAVRAS_DEPOIS
+        value: "0"
+      - key: AJUSTE_MS
+        value: "150"
+      - key: HEYGEN_MIN_VIDEO_DURATION
+        value: "5.0"
+      
+      # JWT Secret (importante para segurança)
+      - key: JWT_SECRET
+        generateValue: true
+      
+      # Porta (Render define automaticamente)
+      - key: PORT
+        value: "8000"
+
+  # ============================================
+  # Evolution API (WhatsApp)
+  # ============================================
+  - type: web
+    name: evolution-api
+    runtime: docker
+    plan: starter  # Pode aumentar se necessário
+    dockerContext: .
+    dockerfilePath: ./Dockerfile.evolution
+    envVars:
+      # API
+      - key: SERVER_PORT
+        value: "8080"
+      - key: AUTHENTICATION_API_KEY
+        sync: false  # Configure uma chave forte
+      
+      # Database - Configure manualmente com a Internal Database URL
+      - key: DATABASE_ENABLED
+        value: "true"
+      - key: DATABASE_PROVIDER
+        value: "postgresql"
+      - key: DATABASE_CONNECTION_URI
+        sync: false
+      - key: DATABASE_SAVE_DATA_INSTANCE
+        value: "true"
+      - key: DATABASE_SAVE_DATA_NEW_MESSAGE
+        value: "true"
+      - key: DATABASE_SAVE_MESSAGE_UPDATE
+        value: "true"
+      - key: DATABASE_SAVE_DATA_CONTACTS
+        value: "true"
+      - key: DATABASE_SAVE_DATA_CHATS
+        value: "true"
+      - key: DATABASE_SAVE_DATA_LABELS
+        value: "true"
+      - key: DATABASE_SAVE_DATA_HISTORIC
+        value: "true"
+      
+      # Redis Cache - Configure manualmente com a Connection String
+      - key: CACHE_LOCAL_ENABLED
+        value: "false"
+      - key: CACHE_REDIS_ENABLED
+        value: "true"
+      - key: CACHE_REDIS_URI
+        sync: false
+      - key: CACHE_REDIS_TTL
+        value: "604800"
+      - key: CONFIG_SESSION_PHONE_VERSION
+        value: "2.3000.1026354025"
+      
+      - key: NODE_ENV
+        value: "production"
+      - key: PORT
+        value: "8080"
+
+# ============================================
+# Databases
+# ============================================
+databases:
+  - name: videosmartai-db
+    plan: starter  # Pode mudar para standard ou pro conforme necessário
+    databaseName: videosmartai
+    user: videosmartai
+    postgresMajorVersion: 15
+
+# ============================================
+# Redis (Render Key Value)
+# ============================================
+# NOTA: Render não suporta Redis diretamente no render.yaml
+# Você precisa criar manualmente um "Key Value Store" no dashboard:
+# 1. Vá em New + → Key Value Store
+# 2. Configure o nome e plan
+# 3. Anote a Connection String
+# 4. Use essa Connection String nas variáveis REDIS_URL e CACHE_REDIS_URI

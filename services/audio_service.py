@@ -655,7 +655,7 @@ async def _send_media_video(numero: str, caminho_video: str, caption: str,
         "number": numero,
         "mediatype": "video",
         "fileName": file_name,
-        "caption": caption or "",
+        "caption": "",  # Sem caption - apenas o vídeo
         "media": b64,
         "mimetype": "video/mp4",
         "isBase64": True,
@@ -672,7 +672,7 @@ async def _send_media_document(numero: str, caminho_video: str, caption: str,
         "number": numero,
         "mediatype": "document",
         "fileName": file_name,
-        "caption": caption or "",
+        "caption": "",  # Sem caption - apenas o vídeo
         "media": b64,
         "mimetype": "video/mp4",
         "isBase64": True,
@@ -765,11 +765,6 @@ async def processar_video(
             seen.add(key)
 
             try:
-                await enviar_texto_via_whatsapp(
-                    telefone, f"Olá {nome}! (teste automático) 🚀",
-                    evo_instance=evo_instance, evo_base=evo_base
-                )
-
                 caminho = await gerar_video_para_nome(
                     nome=nome,
                     palavra_chave=palavra_chave,
@@ -784,7 +779,7 @@ async def processar_video(
                 )
 
                 await enviar_video_via_whatsapp(
-                    caminho, telefone, caption=f"{nome}, seu vídeo personalizado.",
+                    caminho, telefone, caption="",
                     evo_instance=evo_instance, evo_base=evo_base
                 )
 

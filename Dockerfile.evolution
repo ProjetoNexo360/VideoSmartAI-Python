@@ -1,0 +1,10 @@
+# Dockerfile para Evolution API
+FROM atendai/evolution-api:latest
+
+# A imagem já contém tudo necessário
+# Apenas expõe a porta
+EXPOSE 8080
+
+# A Evolution API já tem seu próprio CMD configurado na imagem base
+# Não precisa sobrescrever
+

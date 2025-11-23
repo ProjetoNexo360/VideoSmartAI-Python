@@ -1,6 +1,7 @@
 from datetime import timedelta, datetime
 from uuid import UUID
 from typing import Optional
+import os
 
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
@@ -14,7 +15,7 @@ from models import User
 # =========================
 # Config JWT
 # =========================
-JWT_SECRET = "CHANGE_ME_SUPER_SECRET"  # use env var em prod
+JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME_SUPER_SECRET")  # use env var em prod
 JWT_ALG = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 dias
 
