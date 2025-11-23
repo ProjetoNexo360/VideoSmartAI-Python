@@ -1000,6 +1000,78 @@ async def transcrever_audio_com_timestamps(caminho_audio: str) -> Tuple[str, Lis
 
     return transcricao, segmentos
 
+def _ffmpeg_obter_duracao_audio(caminho_audio: str) -> float:
+    """
+    Obtém a duração total do áudio em segundos usando ffprobe.
+    """
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", caminho_audio
+        ], capture_output=True, text=True, check=True)
+        duracao = float(result.stdout.strip())
+        return duracao
+    except (subprocess.CalledProcessError, ValueError) as e:
+        print(f"[FFMPEG] Erro ao obter duração do áudio: {e}")
+        raise RuntimeError(f"Não foi possível obter a duração do áudio: {e}")
+
+def _estender_audio_para_cadastro(caminho_audio: str, pasta_temp: str, duracao_minima_segundos: float = 5400.0) -> str:
+    """
+    Estende o áudio repetindo-o até atingir a duração mínima necessária para cadastro na ElevenLabs.
+    A duração mínima padrão é 1h30min (5400 segundos).
+    
+    Se o áudio já tiver duração maior ou igual à mínima, retorna o caminho original.
+    Caso contrário, cria um novo arquivo com o áudio repetido até atingir a duração mínima.
+    
+    Args:
+        caminho_audio: Caminho do arquivo de áudio original
+        pasta_temp: Pasta temporária para salvar o áudio estendido
+        duracao_minima_segundos: Duração mínima em segundos (padrão: 5400 = 1h30min)
+    
+    Returns:
+        Caminho do áudio estendido (ou original se já tiver duração suficiente)
+    """
+    try:
+        duracao_atual = _ffmpeg_obter_duracao_audio(caminho_audio)
+        print(f"[AUDIO] Duração atual do áudio: {duracao_atual:.2f} segundos ({duracao_atual/60:.2f} minutos)")
+        
+        if duracao_atual >= duracao_minima_segundos:
+            print(f"[AUDIO] Áudio já tem duração suficiente ({duracao_atual:.2f}s >= {duracao_minima_segundos:.2f}s). Usando original.")
+            return caminho_audio
+        
+        # Calcula quantas repetições são necessárias
+        num_repeticoes = int(duracao_minima_segundos / duracao_atual) + 1
+        print(f"[AUDIO] Estendendo áudio de {duracao_atual:.2f}s para {duracao_minima_segundos:.2f}s (repetindo {num_repeticoes} vezes)")
+        
+        # Cria arquivo de lista para concatenação
+        caminho_audio_estendido = os.path.join(pasta_temp, "audio_estendido_cadastro.wav")
+        lista_concat = os.path.join(pasta_temp, "lista_concat.txt")
+        
+        # Cria lista de arquivos para concatenação (mesmo arquivo repetido)
+        caminho_abs = os.path.abspath(caminho_audio).replace("\\", "/")
+        with open(lista_concat, "w", encoding="utf-8") as f:
+            for _ in range(num_repeticoes):
+                f.write(f"file '{caminho_abs}'\n")
+        
+        # Concatena o áudio usando ffmpeg
+        subprocess.run([
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", lista_concat,
+            "-ac", "1", "-ar", "16000",  # Mantém formato mono 16kHz
+            "-c:a", "pcm_s16le",  # Formato WAV
+            caminho_audio_estendido
+        ], check=True)
+        
+        # Verifica a duração final
+        duracao_final = _ffmpeg_obter_duracao_audio(caminho_audio_estendido)
+        print(f"[AUDIO] Áudio estendido criado com sucesso: {duracao_final:.2f} segundos ({duracao_final/60:.2f} minutos)")
+        
+        return caminho_audio_estendido
+        
+    except Exception as e:
+        print(f"[AUDIO] Erro ao estender áudio: {e}. Usando áudio original.")
+        return caminho_audio
+
 async def verificar_ou_criar_voz(voz_padrao_nome: str, caminho_audio: str, pasta_temp: str) -> str:
     headers = await _eleven_headers()
     response = await _eleven_request("GET", _eleven_url("voices"), headers=headers)
@@ -1008,8 +1080,11 @@ async def verificar_ou_criar_voz(voz_padrao_nome: str, caminho_audio: str, pasta
         if voz.get("name") == voz_padrao_nome:
             return voz.get("voiceId") or voz.get("voice_id")
 
+    # Estende o áudio para cadastro (1h30min mínimo) apenas para o cadastro da voz
+    caminho_audio_para_cadastro = _estender_audio_para_cadastro(caminho_audio, pasta_temp)
+    
     caminho_convertido = os.path.join(pasta_temp, "converted_audio.wav")
-    with open(caminho_audio, "rb") as audio_file:
+    with open(caminho_audio_para_cadastro, "rb") as audio_file:
         files = {"file": ("original.wav", audio_file, "audio/wav")}
         response = await _eleven_request("POST", _eleven_url("convert-audio"), files=files, headers=headers)
         with open(caminho_convertido, "wb") as out_file:
@@ -1565,15 +1640,30 @@ async def heygen_criar_video(group_id: str, voice_id: str, script: str, test: bo
         _log_heygen_error(e, extra={"payload": payload})
         raise
 
-async def heygen_aguardar_video(job_id: str, sleep: float = 2.0) -> str:
+async def heygen_aguardar_video(job_id: str, sleep: float = 3.0) -> str:
     """
     Faz polling em GET /videos/{jobId} até COMPLETED e retorna a URL para download (video_url).
     Usa o jobId retornado por heygen_criar_video.
+    
+    Aguarda 20 segundos antes da primeira verificação para evitar rate limiting (429),
+    depois faz verificações a cada 3 segundos.
     """
     url = _heygen_url(f"videos/{job_id}")
     headers = await _heygen_headers()
+    
+    # Delay inicial de 20 segundos antes da primeira verificação
+    print(f"[HEYGEN] Aguardando 20 segundos antes da primeira verificação do vídeo (job_id={job_id})...")
+    await asyncio.sleep(20.0)
+    
+    primeira_verificacao = True
     while True:
         try:
+            if primeira_verificacao:
+                print(f"[HEYGEN] Primeira verificação do status do vídeo (job_id={job_id})...")
+                primeira_verificacao = False
+            else:
+                print(f"[HEYGEN] Verificando novamente o status do vídeo (job_id={job_id})...")
+            
             resp = await _heygen_request("GET", url, headers=headers)
             j = resp.json() if resp.headers.get("content-type","").startswith("application/json") else {}
             d = _unwrap_data(j)
@@ -1585,7 +1675,10 @@ async def heygen_aguardar_video(job_id: str, sleep: float = 2.0) -> str:
                 return video_url
             if st in ("FAILED","ERROR"):
                 raise RuntimeError(f"[Heygen] job {job_id} falhou: {j!r}")
-            time.sleep(sleep)
+            
+            # Pausa de 3 segundos entre verificações
+            print(f"[HEYGEN] Aguardando {sleep} segundos antes da próxima verificação...")
+            await asyncio.sleep(sleep)
         except Exception as e:
             _log_heygen_error(e, extra={"job_id": job_id})
             raise
